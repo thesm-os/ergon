@@ -46,6 +46,7 @@ var checkMutationCmd = &cobra.Command{
 		return mutation.Run(ctx, xexec.Command{},
 			cmd.OutOrStdout(), cmd.ErrOrStderr(),
 			root, cfg.Checks.Mutation,
+			cfg.Checks.Excludes, cfg.Checks.Skips,
 			mutation.RunOptions{Targets: args, Verbose: mutationVerbose})
 	},
 }

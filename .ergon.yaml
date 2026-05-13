@@ -89,8 +89,31 @@ bench:
     bytes_percent: 10
     allocs_percent: 0
 
-# checks — `ergon check` and its subcommands
+# checks — `ergon check` and its subcommands.
+#
+# `excludes` and `skips` live at this level (not under coverage
+# or mutation) because both gates read the same rules: a file or
+# function exempt from one is invariably exempt from the other.
+# - Coverage filters per-function in its own parser.
+# - Mutation translates the rules into the file-glob regex
+#   `gremlins --exclude-files` accepts; a Skip's func_glob is
+#   honoured at file granularity (gremlins has no per-function
+#   exclusion knob).
 checks:
+  # Path globs the gates ignore. Each entry's `reason` documents
+  # WHY the path is exempt so reviewers can challenge new entries
+  # on PR.
+  excludes:
+    - path: "**/*_test.go"
+      reason: tests are not part of the coverage or mutation gates
+    - path: internal/version/...
+      reason: ldflags-injected build metadata; no logic
+  # Structural skip rules: a function whose name matches func_glob
+  # AND whose file matches file_glob is exempt from every gate.
+  # Used for assertion / contract branches the verifier framework
+  # only exercises against broken implementations.
+  skips: []
+
   # coverage — `ergon check coverage`
   #
   # Per-package thresholds rather than one global number — different
@@ -115,17 +138,6 @@ checks:
         line: 50
         branch: 50
         require_branch: false
-    excludes:
-      - path: "**/*_test.go"
-        reason: tests are not part of the coverage gate
-      - path: internal/version/...
-        reason: ldflags-injected build metadata; no logic
-    # Structural skips orthogonal to the per-layer threshold: a
-    # function whose name matches func_glob AND whose file matches
-    # file_glob is reported under `skipped` but never fails the
-    # check. Used for assertion / contract branches the verifier
-    # framework only exercises against broken implementations.
-    skips: []
     # Cap on the per-target list of below-threshold functions.
     # Anything past the cap is collapsed into "… and N more".
     top_n: 10
@@ -144,14 +156,13 @@ checks:
     packages: []
     # gremlins invocation policy. Workers + test_cpu bound CPU
     # usage; timeout_coefficient tolerates slow-but-finite tests
-    # (gremlins' default of 3 produces spurious timeouts);
-    # exclude_files drops files whose mutants are unkillable
-    # (default covers stringer-generated `_string.go`).
+    # (gremlins' default of 3 produces spurious timeouts). File
+    # exclusion comes from `checks.excludes` / `checks.skips`
+    # above; gremlins' `--exclude-files` is computed at call time.
     gremlins:
       workers: 2
       test_cpu: 2
       timeout_coefficient: 30
-      exclude_files: '.*_string\.go$'
 
   # error-prefix — `ergon check error-prefix`
   error_prefix:

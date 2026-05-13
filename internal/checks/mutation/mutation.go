@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"go.thesmos.sh/ergon/internal/checks/policy"
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/style"
 )
@@ -53,17 +54,27 @@ const maxTopFiles = 10
 // observed to exit 0 regardless of measured efficacy — so the
 // parser owns the verdict.
 //
+// excludes and skips are the shared [policy.Exclude] and
+// [policy.Skip] lists coverage also reads. The path globs in
+// excludes and the FileGlob field of every skip are joined into
+// the single regex `gremlins --exclude-files` accepts; gremlins
+// has no per-function exclusion knob, so a skip's FuncGlob is not
+// applied here (the FileGlob is the closest approximation, which
+// matches the bash predecessor's policy).
+//
 // An empty cfg.Packages short-circuits with a notice; the project
 // simply has not declared thresholds yet.
 func Run(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
-	root string, cfg Config, opts RunOptions,
+	root string, cfg Config,
+	excludes []policy.Exclude, skips []policy.Skip, opts RunOptions,
 ) error {
 	if len(cfg.Packages) == 0 {
 		fmt.Fprintln(stdout, "mutation: no thresholds declared in .ergon.yaml; skipping")
 		return nil
 	}
 	cfg = withDefaults(cfg)
+	excludeRegex := policy.GremlinsExcludeRegex(excludes, skips)
 
 	targets, err := selectTargets(cfg.Packages, opts.Targets)
 	if err != nil {
@@ -81,7 +92,7 @@ func Run(
 			continue
 		}
 		ran++
-		failed := renderTarget(ctx, runner, stdout, s, root, t, cfg.Gremlins, opts.Verbose)
+		failed := renderTarget(ctx, runner, stdout, s, root, t, cfg.Gremlins, excludeRegex, opts.Verbose)
 		if failed {
 			anyFailed = true
 		}
@@ -208,7 +219,8 @@ func resolveCoverage(l Layer) int {
 func renderTarget(
 	ctx context.Context, runner xexec.Runner,
 	stdout io.Writer, s style.Style,
-	root string, t target, gcfg GremlinsConfig, verbose bool,
+	root string, t target, gcfg GremlinsConfig,
+	excludeRegex string, verbose bool,
 ) bool {
 	details := fmt.Sprintf("score ≥ %d%% / coverage ≥ %d%%   %s",
 		t.Score, t.Coverage,
@@ -216,7 +228,7 @@ func renderTarget(
 	s.Header(stdout, t.Label, details)
 
 	start := time.Now()
-	out, runErr := runGremlins(ctx, runner, filepath.Join(root, t.Layer), t.RelPath, gcfg)
+	out, runErr := runGremlins(ctx, runner, filepath.Join(root, t.Layer), t.RelPath, gcfg, excludeRegex)
 	elapsed := time.Since(start)
 
 	score, scoreOK := parsePercent(out, "Test efficacy:")
@@ -265,18 +277,24 @@ func renderTarget(
 // filesystem path passed verbatim. Output is captured to a buffer
 // — the verdict is parsed from the captured log, not signalled by
 // the subprocess exit code (see the package docblock).
+//
+// excludeRegex is the precomputed `--exclude-files` value derived
+// from the shared policy lists; an empty string omits the flag.
 func runGremlins(
-	ctx context.Context, runner xexec.Runner, dir, relPath string, cfg GremlinsConfig,
+	ctx context.Context, runner xexec.Runner, dir, relPath string,
+	cfg GremlinsConfig, excludeRegex string,
 ) (string, error) {
 	var buf bytes.Buffer
 	args := []string{
 		"unleash",
-		"--exclude-files", cfg.ExcludeFiles,
 		"--timeout-coefficient", strconv.Itoa(cfg.TimeoutCoefficient),
 		"--workers", strconv.Itoa(cfg.Workers),
 		"--test-cpu", strconv.Itoa(cfg.TestCPU),
-		relPath,
 	}
+	if excludeRegex != "" {
+		args = append(args, "--exclude-files", excludeRegex)
+	}
+	args = append(args, relPath)
 	err := runner.Run(ctx,
 		xexec.Options{Dir: dir, Stdout: &buf, Stderr: &buf},
 		"gremlins", args...)
@@ -540,9 +558,6 @@ func withDefaults(cfg Config) Config {
 	}
 	if cfg.Gremlins.TimeoutCoefficient == 0 {
 		cfg.Gremlins.TimeoutCoefficient = d.Gremlins.TimeoutCoefficient
-	}
-	if cfg.Gremlins.ExcludeFiles == "" {
-		cfg.Gremlins.ExcludeFiles = d.Gremlins.ExcludeFiles
 	}
 	return cfg
 }

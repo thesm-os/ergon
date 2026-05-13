@@ -72,6 +72,7 @@ var checkCmd = &cobra.Command{
 		coverageDir := filepath.Join(root, "."+name, "coverage")
 		if err = coverage.Run(ctx, runner, stdout, stderr,
 			root, coverageDir, importPath+"/", cfg.Checks.Coverage,
+			cfg.Checks.Excludes, cfg.Checks.Skips,
 			coverage.RunOptions{}); err != nil {
 			return err
 		}

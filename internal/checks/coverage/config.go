@@ -2,15 +2,21 @@
 // SPDX-License-Identifier: MIT
 
 // Package coverage enforces per-layer Go test coverage thresholds.
-// The thresholds and exclude list live inline under
-// `.ergon.yaml`'s `checks.coverage` section; ergon merges every
-// per-module `.out` profile produced by `ergon test`, runs
-// `go tool cover -func` against the result, and fails any
-// function below its layer's `line` threshold.
+// The thresholds live inline under `.ergon.yaml`'s
+// `checks.coverage` section; the path-exclusion and structural-
+// skip rules live one level up under `checks.excludes` /
+// `checks.skips` because mutation reads the same rules
+// (see [go.thesmos.sh/ergon/internal/checks/policy]).
+//
+// ergon merges every per-module `.out` profile produced by
+// `ergon test`, runs `go tool cover -func` against the result,
+// and fails any function below its layer's `line` threshold.
 package coverage
 
-// Config declares the per-layer thresholds, exclude list, and
-// structural skip rules. An empty config disables the check —
+// Config declares the per-layer thresholds and the reporting cap.
+// Exclude and Skip rules are NOT held here — they live under
+// `checks.excludes` / `checks.skips` so mutation can read the
+// same set. An empty [Config.Packages] disables the check —
 // `ergon check coverage` short-circuits with a notice.
 type Config struct {
 	// Packages declares the per-layer thresholds. Each entry's
@@ -18,18 +24,6 @@ type Config struct {
 	// matched against the repo-relative path of every function in
 	// the merged coverprofile. Longest-prefix wins.
 	Packages []Layer `mapstructure:"packages"`
-
-	// Excludes drops functions whose path matches any entry from
-	// the threshold check. Excluded functions are counted in the
-	// report under "excluded" but never fail the build.
-	Excludes []Exclude `mapstructure:"excludes"`
-
-	// Skips lists structural skip rules orthogonal to layer
-	// thresholds: a function whose name matches FuncGlob AND whose
-	// file matches FileGlob is counted under "skipped" but never
-	// fails. Used for assertion branches the verifier framework
-	// only exercises against broken implementations.
-	Skips []Skip `mapstructure:"skips"`
 
 	// TopN caps the per-target failing-function list so the
 	// report stays scannable. A surplus is summarised as
@@ -59,27 +53,6 @@ type Layer struct {
 	// RequireBranch turns the branch gate on when the runner
 	// supports it. Today the field is recorded but unused.
 	RequireBranch bool `mapstructure:"require_branch"`
-}
-
-// Exclude carries one path glob the coverage check ignores. The
-// reason is human-facing only — it documents WHY the path is
-// exempt so reviewers can challenge new excludes on PR.
-type Exclude struct {
-	Path   string `mapstructure:"path"`
-	Reason string `mapstructure:"reason"`
-}
-
-// Skip declares a structural skip rule. A function matching BOTH
-// FuncGlob and FileGlob is reported as skipped (under Label) but
-// never fails the threshold check.
-//
-// Globs use shell-glob syntax: `*` matches any sequence except a
-// path separator; literal characters match themselves. The label
-// is human-facing and appears in the per-target summary.
-type Skip struct {
-	Label    string `mapstructure:"label"`
-	FuncGlob string `mapstructure:"func_glob"`
-	FileGlob string `mapstructure:"file_glob"`
 }
 
 // Defaults returns an empty Config. Coverage thresholds are an

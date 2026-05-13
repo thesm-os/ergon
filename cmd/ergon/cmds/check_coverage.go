@@ -56,6 +56,7 @@ var checkCoverageCmd = &cobra.Command{
 		return coverage.Run(ctx, xexec.Command{},
 			cmd.OutOrStdout(), cmd.ErrOrStderr(),
 			root, coverageDir, importPath+"/", cfg.Checks.Coverage,
+			cfg.Checks.Excludes, cfg.Checks.Skips,
 			coverage.RunOptions{Targets: args, Verbose: coverageVerbose})
 	},
 }

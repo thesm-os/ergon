@@ -62,6 +62,11 @@ type Layer struct {
 // GremlinsConfig carries the per-invocation tuning ergon passes
 // to `gremlins unleash`. Field defaults are chosen for CI fairness
 // (bounded CPU usage) and to tolerate slow-but-finite tests.
+//
+// File-exclusion (`--exclude-files`) is NOT held here — it is
+// derived from the shared `checks.excludes` and `checks.skips`
+// lists at call time so a single policy controls both gates. See
+// [go.thesmos.sh/ergon/internal/checks/policy].
 type GremlinsConfig struct {
 	// Workers caps the number of parallel mutation workers
 	// gremlins runs. gremlins defaults to NumCPU; ergon bounds it
@@ -80,12 +85,6 @@ type GremlinsConfig struct {
 	// slow-but-finite tests time out spuriously and inflate the
 	// LIVED count. 30 lets elite tests actually KILL their mutants.
 	TimeoutCoefficient int `mapstructure:"timeout_coefficient"`
-
-	// ExcludeFiles is the regex passed to `--exclude-files`.
-	// Default skips stringer-generated `_string.go` files;
-	// arithmetic-identity mutants on `i - 0` are unkillable there.
-	// Repos extend the regex to cover their own generated files.
-	ExcludeFiles string `mapstructure:"exclude_files"`
 }
 
 // Defaults returns the Config ergon uses when a repository's
@@ -98,7 +97,6 @@ func Defaults() Config {
 			Workers:            defaultWorkers(),
 			TestCPU:            2,
 			TimeoutCoefficient: 30,
-			ExcludeFiles:       `.*_string\.go$`,
 		},
 	}
 }

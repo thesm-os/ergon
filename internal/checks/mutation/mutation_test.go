@@ -28,7 +28,7 @@ func TestRun(t *testing.T) {
 		t.Parallel()
 		runner := &fakeRunner{}
 		var stdout strings.Builder
-		err := Run(t.Context(), runner, &stdout, io.Discard, t.TempDir(), Config{}, RunOptions{})
+		err := Run(t.Context(), runner, &stdout, io.Discard, t.TempDir(), Config{}, nil, nil, RunOptions{})
 		if err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
@@ -47,7 +47,7 @@ func TestRun(t *testing.T) {
 
 		cfg := Config{Packages: []Layer{{Path: "foundation/...", Score: 90, Coverage: 90}}}
 		var stdout strings.Builder
-		err := Run(t.Context(), runner, &stdout, io.Discard, root, cfg, RunOptions{})
+		err := Run(t.Context(), runner, &stdout, io.Discard, root, cfg, nil, nil, RunOptions{})
 		if err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
@@ -63,7 +63,7 @@ func TestRun(t *testing.T) {
 
 		cfg := Config{Packages: []Layer{{Path: "foundation/...", Score: 90, Coverage: 90}}}
 		var stderr strings.Builder
-		err := Run(t.Context(), runner, io.Discard, &stderr, root, cfg, RunOptions{})
+		err := Run(t.Context(), runner, io.Discard, &stderr, root, cfg, nil, nil, RunOptions{})
 		if err == nil {
 			t.Fatal("Run returned nil, want failure")
 		}
@@ -78,7 +78,7 @@ func TestRun(t *testing.T) {
 		runner := &fakeRunner{output: gremlinsOutput(95, 50)}
 
 		cfg := Config{Packages: []Layer{{Path: "foundation/...", Score: 90, Coverage: 90}}}
-		err := Run(t.Context(), runner, io.Discard, io.Discard, root, cfg, RunOptions{})
+		err := Run(t.Context(), runner, io.Discard, io.Discard, root, cfg, nil, nil, RunOptions{})
 		if err == nil {
 			t.Fatal("Run returned nil, want failure")
 		}
@@ -90,7 +90,7 @@ func TestRun(t *testing.T) {
 		runner := &fakeRunner{output: gremlinsOutput(95, 91)}
 
 		cfg := Config{Packages: []Layer{{Path: "foundation/...", Score: 90}}}
-		err := Run(t.Context(), runner, io.Discard, io.Discard, root, cfg, RunOptions{})
+		err := Run(t.Context(), runner, io.Discard, io.Discard, root, cfg, nil, nil, RunOptions{})
 		if err != nil {
 			t.Fatalf("Run err: %v, want score-default to accept coverage=91", err)
 		}
@@ -103,7 +103,7 @@ func TestRun(t *testing.T) {
 
 		cfg := Config{Packages: []Layer{{Path: "foundation/...", Score: 90}}}
 		var stdout strings.Builder
-		err := Run(t.Context(), runner, &stdout, io.Discard, root, cfg, RunOptions{})
+		err := Run(t.Context(), runner, &stdout, io.Discard, root, cfg, nil, nil, RunOptions{})
 		if err == nil {
 			t.Fatal("Run returned nil, want no-targets error")
 		}
@@ -124,7 +124,7 @@ func TestRun(t *testing.T) {
 		}
 
 		cfg := Config{Packages: []Layer{{Path: "foundation/...", Score: 90}}}
-		err := Run(t.Context(), runner, io.Discard, io.Discard, root, cfg, RunOptions{})
+		err := Run(t.Context(), runner, io.Discard, io.Discard, root, cfg, nil, nil, RunOptions{})
 		if err == nil {
 			t.Fatal("Run returned nil, want gremlins error")
 		}
@@ -140,7 +140,7 @@ func TestRun(t *testing.T) {
 			{Path: "core/...", Score: 90, Coverage: 90},
 		}}
 		err := Run(t.Context(), runner, io.Discard, io.Discard, root, cfg,
-			RunOptions{Targets: []string{"core"}})
+			nil, nil, RunOptions{Targets: []string{"core"}})
 		if err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
@@ -159,7 +159,7 @@ func TestRun(t *testing.T) {
 
 		cfg := Config{Packages: []Layer{{Path: "core/...", Score: 90, Coverage: 90}}}
 		err := Run(t.Context(), runner, io.Discard, io.Discard, root, cfg,
-			RunOptions{Targets: []string{"core/kernel/fold"}})
+			nil, nil, RunOptions{Targets: []string{"core/kernel/fold"}})
 		if err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
@@ -178,7 +178,7 @@ func TestRun(t *testing.T) {
 
 		cfg := Config{Packages: []Layer{{Path: "foundation/...", Score: 90}}}
 		err := Run(t.Context(), runner, io.Discard, io.Discard, root, cfg,
-			RunOptions{Targets: []string{"unknown"}})
+			nil, nil, RunOptions{Targets: []string{"unknown"}})
 		if err == nil {
 			t.Fatal("Run returned nil, want unknown-layer error")
 		}

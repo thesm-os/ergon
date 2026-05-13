@@ -11,12 +11,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	"go.thesmos.sh/ergon/internal/checks/policy"
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/style"
 )
@@ -45,9 +45,16 @@ type RunOptions struct {
 // cover` output to derive repo-relative paths matching the
 // schema's globs (typically `<importPath>/` from
 // `discover.ImportPath`).
+//
+// excludes and skips are the shared [policy.Exclude] and
+// [policy.Skip] lists; mutation reads the same lists. A function
+// whose path matches an exclude is counted under "excluded";
+// one whose (func name, file path) satisfies a skip is counted
+// under "skipped". Neither contributes to the failure count.
 func Run(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
-	root, coverageDir, modulePrefix string, cfg Config, opts RunOptions,
+	root, coverageDir, modulePrefix string, cfg Config,
+	excludes []policy.Exclude, skips []policy.Skip, opts RunOptions,
 ) error {
 	cfg = withDefaults(cfg)
 	if len(cfg.Packages) == 0 {
@@ -75,8 +82,6 @@ func Run(
 	}
 
 	rows := parseFuncLog(funcLog)
-	excludes := compileExcludes(cfg.Excludes)
-	skips := cfg.Skips
 
 	targets := selectTargets(cfg.Packages, opts.Targets)
 	if len(targets) == 0 {
@@ -168,8 +173,8 @@ func longestPrefixLayer(packages []Layer, t string) (Layer, bool) {
 // at least one function failed the threshold check.
 func renderTarget(
 	stdout io.Writer, s style.Style, layer Layer,
-	rows []funcRow, excludes []*regexp.Regexp,
-	skips []Skip, modulePrefix string, topN int, verbose bool,
+	rows []funcRow, excludes []policy.Exclude,
+	skips []policy.Skip, modulePrefix string, topN int, verbose bool,
 	mergedBody string,
 ) bool {
 	prefix := strings.TrimSuffix(layer.Path, "/...")
@@ -189,11 +194,11 @@ func renderTarget(
 			passing++
 			continue
 		}
-		if matchesAny(rel, excludes) {
+		if policy.MatchesExclude(rel, excludes) {
 			excluded++
 			continue
 		}
-		if matchesSkip(r.Func, rel, skips) {
+		if policy.MatchesSkip(r.Func, rel, skips) {
 			skipped++
 			continue
 		}
@@ -296,33 +301,6 @@ func uniqueFiles(failures []Failure) []string {
 		out = append(out, f.Path)
 	}
 	return out
-}
-
-// matchesSkip reports whether func/path satisfies any structural
-// skip rule. Both globs must match.
-func matchesSkip(funcName, path string, skips []Skip) bool {
-	for _, sk := range skips {
-		if globMatch(sk.FuncGlob, funcName) && globMatch(sk.FileGlob, path) {
-			return true
-		}
-	}
-	return false
-}
-
-// globMatch implements the shell-style glob the bash scripts used
-// for SKIPS — `*` matches any run of characters (including path
-// separators), other characters match literally.
-func globMatch(pattern, s string) bool {
-	if pattern == "" {
-		return false
-	}
-	if pattern == "*" {
-		return true
-	}
-	re := "^" + regexp.QuoteMeta(pattern) + "$"
-	re = strings.ReplaceAll(re, `\*`, ".*")
-	matched, err := regexp.MatchString(re, s)
-	return err == nil && matched
 }
 
 // findProfiles returns every `*.out` file under dir, sorted by
@@ -442,51 +420,6 @@ func stripFileLocation(s string) string {
 	return s
 }
 
-// compiledLayer pairs a [Layer] with its compiled regex.
-type compiledLayer struct {
-	Path      string
-	Threshold int
-	Pattern   *regexp.Regexp
-}
-
-// compileLayers translates each schema layer's glob into an
-// anchored regex and sorts the result by descending path length
-// — the longest-prefix layer wins.
-func compileLayers(layers []Layer) []compiledLayer {
-	out := make([]compiledLayer, 0, len(layers))
-	for _, l := range layers {
-		out = append(out, compiledLayer{
-			Path:      l.Path,
-			Threshold: l.Line,
-			Pattern:   regexp.MustCompile(globToRegex(l.Path)),
-		})
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		return len(out[i].Path) > len(out[j].Path)
-	})
-	return out
-}
-
-// compileExcludes turns the schema's exclude entries into
-// compiled regexes.
-func compileExcludes(ex []Exclude) []*regexp.Regexp {
-	out := make([]*regexp.Regexp, 0, len(ex))
-	for _, e := range ex {
-		out = append(out, regexp.MustCompile(globToRegex(e.Path)))
-	}
-	return out
-}
-
-// globToRegex translates the schema's glob syntax to an anchored
-// regex. `...` matches any sequence of path segments; `*` matches
-// within one segment (modelled as `.*` for simplicity).
-func globToRegex(pat string) string {
-	escaped := strings.ReplaceAll(pat, ".", `\.`)
-	triple := strings.ReplaceAll(escaped, `\.\.\.`, ".*")
-	star := strings.ReplaceAll(triple, "*", ".*")
-	return "^" + star + "$"
-}
-
 // Failure records one threshold violation for reporting.
 type Failure struct {
 	Path      string
@@ -494,11 +427,4 @@ type Failure struct {
 	Pct       float64
 	Threshold int
 	Layer     string
-}
-
-// matchesAny reports whether s matches any of the regexes.
-func matchesAny(s string, patterns []*regexp.Regexp) bool {
-	return slices.ContainsFunc(patterns, func(p *regexp.Regexp) bool {
-		return p.MatchString(s)
-	})
 }

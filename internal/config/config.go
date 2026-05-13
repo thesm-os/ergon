@@ -20,6 +20,7 @@ import (
 	"go.thesmos.sh/ergon/internal/checks/coverage"
 	"go.thesmos.sh/ergon/internal/checks/errorprefix"
 	"go.thesmos.sh/ergon/internal/checks/mutation"
+	"go.thesmos.sh/ergon/internal/checks/policy"
 	"go.thesmos.sh/ergon/internal/license"
 	"go.thesmos.sh/ergon/internal/markdown"
 	"go.thesmos.sh/ergon/internal/test"
@@ -76,7 +77,25 @@ type Config struct {
 // ChecksConfig groups the per-check configs so each subsystem's
 // settings live under a single top-level YAML key (`checks:`) the
 // way the design's example shows.
+//
+// Excludes and Skips live at this level — not under coverage or
+// mutation — because both gates read the same rules: a generated
+// file or conformance-suite entry that is exempt from one is
+// invariably exempt from the other. See [policy.Exclude] and
+// [policy.Skip].
 type ChecksConfig struct {
+	// Excludes is the shared path-exclusion list both coverage
+	// and mutation consult. A path matching any [policy.Exclude]
+	// is dropped from the coverage threshold check and excluded
+	// from gremlins via `--exclude-files`.
+	Excludes []policy.Exclude `mapstructure:"excludes"`
+
+	// Skips is the shared structural-skip list both gates
+	// consult. Coverage applies the (FuncGlob, FileGlob) pair
+	// function-by-function; mutation, lacking a per-function
+	// exclusion knob in gremlins, applies the FileGlob alone.
+	Skips []policy.Skip `mapstructure:"skips"`
+
 	// Coverage configures `ergon check coverage`. See
 	// [coverage.Config].
 	Coverage coverage.Config `mapstructure:"coverage"`
