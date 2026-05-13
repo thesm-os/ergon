@@ -21,6 +21,20 @@ import (
 //go:embed all:templates
 var templatesFS embed.FS
 
+// dotfileRenames maps the placeholder basenames used inside
+// `templates/` to their dotfile equivalents written into the
+// destination repository. embed.FS refuses dotfile names at the
+// top of the embedded path, so each entry here trades a regular
+// basename inside templates/ for the leading-dot name users
+// actually expect in their repo root.
+var dotfileRenames = map[string]string{
+	"gitignore":              ".gitignore",
+	"ergon.yaml":             ".ergon.yaml",
+	"editorconfig":           ".editorconfig",
+	"pre-commit-config.yaml": ".pre-commit-config.yaml",
+	"golangci.yml":           ".golangci.yml",
+}
+
 // Vars carries the substitution values `text/template` injects
 // into each scaffold template.
 type Vars struct {
@@ -58,15 +72,13 @@ func Run(stdout io.Writer, dest string, vars Vars, force bool) error {
 			return err
 		}
 		rel = strings.TrimSuffix(rel, ".tmpl")
-		// Templates whose basename starts with `gitignore` rename to
-		// `.gitignore`; embed.FS refuses dotfile names at the top of
-		// the path, so we use a placeholder.
+		// embed.FS refuses dotfile names at the top of the path, so
+		// templates that resolve to repo-root dotfiles are stored
+		// under a placeholder basename and renamed here. Add new
+		// entries when adding scaffolded dotfiles.
 		base := filepath.Base(rel)
-		if base == "gitignore" {
-			rel = filepath.Join(filepath.Dir(rel), ".gitignore")
-		}
-		if base == "ergon.yaml" {
-			rel = filepath.Join(filepath.Dir(rel), ".ergon.yaml")
+		if newName, ok := dotfileRenames[base]; ok {
+			rel = filepath.Join(filepath.Dir(rel), newName)
 		}
 		target := filepath.Join(dest, rel)
 

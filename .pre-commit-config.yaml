@@ -38,10 +38,14 @@ repos:
         pass_filenames: false
 
   # ─── Commit message ───────────────────────────────────────────
+  # `ergon check commit-msg` validates the Conventional Commits
+  # subset declared in `.ergon.yaml`'s `checks.commit_msg`. No
+  # Node/npm dependency; pre-commit passes the path to
+  # `.git/COMMIT_EDITMSG` as the first positional arg.
   - repo: local
     hooks:
-      - id: commitlint
-        name: commitlint
-        entry: npx --yes --package @commitlint/cli@latest --package @commitlint/config-conventional@latest -- commitlint --edit
+      - id: ergon-commit-msg
+        name: ergon check commit-msg
+        entry: ergon check commit-msg
         language: system
         stages: [commit-msg]

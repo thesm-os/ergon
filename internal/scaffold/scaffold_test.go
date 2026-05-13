@@ -28,6 +28,9 @@ func TestRun(t *testing.T) {
 			"Makefile",
 			".ergon.yaml",
 			".gitignore",
+			".editorconfig",
+			".pre-commit-config.yaml",
+			".golangci.yml",
 			"README.md",
 			".github/workflows/ci.yml",
 		}
