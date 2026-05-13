@@ -115,8 +115,10 @@ func TestVerify(t *testing.T) {
 			if name != "git" || len(args) == 0 || args[0] != "diff" {
 				return nil
 			}
+			// filepath.Join produces Windows backslashes on Windows;
+			// normalise via filepath.ToSlash before the prefix check.
 			for _, a := range args {
-				if strings.HasPrefix(a, "cli/") {
+				if strings.HasPrefix(filepath.ToSlash(a), "cli/") {
 					return errors.New("exit status 1")
 				}
 			}

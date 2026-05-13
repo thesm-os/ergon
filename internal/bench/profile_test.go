@@ -173,7 +173,9 @@ func TestPlannedArtefacts(t *testing.T) {
 	if got[0].Kind != "cpu" || got[1].Kind != "mem" {
 		t.Fatalf("kind order = %s/%s, want cpu/mem", got[0].Kind, got[1].Kind)
 	}
-	if !strings.HasPrefix(got[0].Path, "/tmp/pkg/") {
+	// filepath.ToSlash normalises Windows backslashes so the
+	// prefix assertion stays portable.
+	if !strings.HasPrefix(filepath.ToSlash(got[0].Path), "/tmp/pkg/") {
 		t.Fatalf("path = %q, want /tmp/pkg/ prefix", got[0].Path)
 	}
 
