@@ -2,7 +2,7 @@
         lint lint-md tidy check-tidy \
         test test-race test-bench test-fuzz test-coverage \
         bench-baseline bench-regression \
-        check check-coverage check-mutation check-vuln \
+        check check-coverage check-uncovered check-mutation check-vuln \
         release
 
 # ergon dogfoods itself. `go run` keeps the dev loop snappy
@@ -60,6 +60,8 @@ check: ## Run the umbrella pre-merge gate (mod, lint, test, coverage, ...)
 	$(ERGON) check
 check-coverage: ## Enforce per-layer coverage thresholds
 	$(ERGON) check coverage
+check-uncovered: ## List every uncovered line across the tree (ignores layer config + excludes)
+	$(ERGON) check coverage uncovered
 check-mutation: ## Run gremlins mutation testing per layer (slow)
 	$(ERGON) check mutation
 check-vuln: ## Run govulncheck per module
