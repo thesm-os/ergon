@@ -13,8 +13,57 @@ import (
 	"testing"
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
+	"go.thesmos.sh/ergon/internal/modules"
 	"go.thesmos.sh/ergon/internal/style"
 )
+
+// testImports is the canonical single-module fixture
+// (`go.example.com/x` mapped to the repo root) used across the
+// per-call tests. Mirrors the shape `discover.ModuleImports`
+// returns for a single-module repo.
+var testImports = []modules.Import{{Dir: ".", ImportPath: "go.example.com/x"}}
+
+// testProjImports mirrors testImports for the `go.thesmos.sh/proj`
+// fixture used by [TestCollectUncoveredBlocks].
+var testProjImports = []modules.Import{{Dir: ".", ImportPath: "go.thesmos.sh/proj"}}
+
+// TestToRepoRelative pins the multi-module translation: each
+// import is matched longest-prefix-first, the root module strips
+// to a leading-slash-free path, and a token with no matching
+// module surfaces verbatim so misconfiguration is visible.
+func TestToRepoRelative(t *testing.T) {
+	t.Parallel()
+
+	imports := sortedPrefixes([]modules.Import{
+		{Dir: ".", ImportPath: "go.example.com/proj"},
+		{Dir: "cli", ImportPath: "go.example.com/proj/cli"},
+		{Dir: "backend/golang", ImportPath: "go.example.com/backend"},
+	})
+
+	cases := []struct {
+		in   string
+		want string
+	}{
+		// Root module — strips, leading slash gone.
+		{"go.example.com/proj/internal/foo.go", "internal/foo.go"},
+		// Nested module wins over its parent (longest-prefix-first).
+		{"go.example.com/proj/cli/internal/bar.go", "cli/internal/bar.go"},
+		// Diverging submodule (different import-path tree) maps to
+		// the workspace-relative path it actually lives at.
+		{"go.example.com/backend/pkg/baz.go", "backend/golang/pkg/baz.go"},
+		// Exact-import-path with no path tail.
+		{"go.example.com/proj", ""},
+		{"go.example.com/backend", "backend/golang"},
+		// Unknown module surfaces verbatim — misconfiguration
+		// stays visible instead of silently mis-classifying.
+		{"go.somewhere/else/qux.go", "go.somewhere/else/qux.go"},
+	}
+	for _, tc := range cases {
+		if got := toRepoRelative(imports, tc.in); got != tc.want {
+			t.Errorf("toRepoRelative(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
 
 // TestParseFuncLog pins the parser against representative
 // `go tool cover -func` output.
@@ -114,7 +163,7 @@ func TestCollectUncoveredBlocks(t *testing.T) {
 		"go.thesmos.sh/proj/pkg/a.go:5.1,9.2 2 0",
 		"go.thesmos.sh/proj/pkg/b.go:1.1,4.2 4 0",
 	}, "\n")
-	got := collectUncoveredBlocks(merged, "go.thesmos.sh/proj/")
+	got := collectUncoveredBlocks(merged, testProjImports)
 	if len(got) != 2 {
 		t.Fatalf("files = %d, want 2", len(got))
 	}
@@ -142,7 +191,7 @@ func TestUncovered(t *testing.T) {
 		t.Parallel()
 		dir := filepath.Join(t.TempDir(), "missing")
 		err := Uncovered(t.Context(), &fakeCovRunner{}, io.Discard, io.Discard,
-			"", dir, "", Config{}, nil, nil, UncoveredOptions{All: true})
+			"", dir, nil, Config{}, nil, nil, UncoveredOptions{All: true})
 		if err == nil {
 			t.Fatal("Uncovered returned nil, want missing-profiles error")
 		}
@@ -165,7 +214,7 @@ func TestUncovered(t *testing.T) {
 		}
 		var stdout strings.Builder
 		err := Uncovered(t.Context(), runner, &stdout, io.Discard,
-			"", dir, "go.example.com/x/",
+			"", dir, testImports,
 			Config{}, nil, nil, UncoveredOptions{All: true})
 		if err != nil {
 			t.Fatalf("Uncovered err: %v", err)
@@ -203,7 +252,7 @@ func TestUncovered(t *testing.T) {
 		cfg := Config{Packages: []Layer{{Path: "internal/...", Line: 70}}}
 		var stdout strings.Builder
 		err := Uncovered(t.Context(), runner, &stdout, io.Discard,
-			"", dir, "go.example.com/x/",
+			"", dir, testImports,
 			cfg, nil, nil, UncoveredOptions{})
 		if err != nil {
 			t.Fatalf("Uncovered err: %v", err)
@@ -227,7 +276,7 @@ func TestUncovered(t *testing.T) {
 		runner := &fakeCovRunner{funcLog: "go.example.com/x/a.go:1:\tA\t100.0%\n"}
 		var stdout strings.Builder
 		err := Uncovered(t.Context(), runner, &stdout, io.Discard,
-			"", dir, "go.example.com/x/",
+			"", dir, testImports,
 			Config{}, nil, nil, UncoveredOptions{All: true})
 		if err != nil {
 			t.Fatalf("Uncovered err: %v", err)
@@ -251,7 +300,7 @@ func TestIndexFunctionsByFile(t *testing.T) {
 		"go.example.com/x/b.go:1:\tBeenAround\t100.0%",
 		"total:\t\t\t88.0%",
 	}, "\n")
-	got := indexFunctionsByFile(funcLog, "go.example.com/x/")
+	got := indexFunctionsByFile(funcLog, testImports)
 	if len(got) != 2 {
 		t.Fatalf("files = %d, want 2", len(got))
 	}
@@ -365,7 +414,7 @@ func TestWriteUncoveredRanges(t *testing.T) {
 	}, "\n")
 	failures := []Failure{{Path: "a.go"}}
 	var buf strings.Builder
-	writeUncoveredRanges(&buf, style.Style{}, failures, "go.example.com/x/", merged)
+	writeUncoveredRanges(&buf, style.Style{}, failures, testImports, merged)
 	out := buf.String()
 	if !strings.Contains(out, "Uncovered ranges") {
 		t.Fatalf("output missing header: %q", out)
@@ -394,7 +443,7 @@ func TestRenderTarget(t *testing.T) {
 	}
 	var buf strings.Builder
 	failed := renderTarget(&buf, style.Style{}, layer, rows, nil, nil,
-		"go.example.com/x/", 10, false, "")
+		testImports, 10, false, "")
 	if !failed {
 		t.Fatal("renderTarget returned false, want true (one row below threshold)")
 	}
@@ -429,7 +478,7 @@ func TestRun(t *testing.T) {
 		cfg := Config{Packages: []Layer{{Path: "internal/...", Line: 70}}}
 		var stdout strings.Builder
 		err := Run(t.Context(), runner, &stdout, io.Discard,
-			"", dir, "go.example.com/x/", cfg, nil, nil, RunOptions{})
+			"", dir, testImports, cfg, nil, nil, RunOptions{})
 		if err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
@@ -450,7 +499,7 @@ func TestRun(t *testing.T) {
 		}
 		cfg := Config{Packages: []Layer{{Path: "internal/...", Line: 70}}}
 		err := Run(t.Context(), runner, io.Discard, io.Discard,
-			"", dir, "go.example.com/x/", cfg, nil, nil, RunOptions{})
+			"", dir, testImports, cfg, nil, nil, RunOptions{})
 		if err == nil {
 			t.Fatal("Run returned nil, want failure")
 		}
@@ -465,7 +514,7 @@ func TestRun(t *testing.T) {
 		runner := &fakeCovRunner{}
 		var stdout strings.Builder
 		err := Run(t.Context(), runner, &stdout, io.Discard,
-			"", dir, "", Config{}, nil, nil, RunOptions{})
+			"", dir, nil, Config{}, nil, nil, RunOptions{})
 		if err != nil {
 			t.Fatalf("Run err: %v", err)
 		}

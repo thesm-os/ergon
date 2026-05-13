@@ -41,11 +41,11 @@ var checkCoverageCmd = &cobra.Command{
 	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
-		root, err := discover.Root(ctx)
+		root, mods, err := discover.Resolve(ctx, cfg.Modules)
 		if err != nil {
 			return err
 		}
-		importPath, err := discover.ImportPath(root)
+		imports, err := discover.ModuleImports(root, mods)
 		if err != nil {
 			return err
 		}
@@ -56,7 +56,7 @@ var checkCoverageCmd = &cobra.Command{
 		coverageDir := filepath.Join(root, "."+name, "coverage")
 		return coverage.Run(ctx, xexec.Command{},
 			cmd.OutOrStdout(), cmd.ErrOrStderr(),
-			root, coverageDir, importPath+"/", cfg.Checks.Coverage,
+			root, coverageDir, imports, cfg.Checks.Coverage,
 			cfg.Checks.Excludes, cfg.Checks.Skips,
 			coverage.RunOptions{Targets: args, Verbose: coverageVerbose})
 	},

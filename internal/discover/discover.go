@@ -61,10 +61,17 @@ func Resolve(ctx context.Context, override []string) (string, []modules.Module, 
 // or unreadable, and report a usage-style error when the file
 // exists but contains no `module` directive (a malformed go.mod).
 func ImportPath(root string) (string, error) {
-	path := filepath.Join(root, "go.mod")
-	body, err := os.ReadFile(path)
+	return ModuleImportPath(filepath.Join(root, "go.mod"))
+}
+
+// ModuleImportPath returns the `module` directive declared in the
+// go.mod at goModPath. Used by callers that need a specific
+// submodule's import path (each submodule has its own go.mod), not
+// just the root.
+func ModuleImportPath(goModPath string) (string, error) {
+	body, err := os.ReadFile(goModPath)
 	if err != nil {
-		return "", fmt.Errorf("read %s: %w", path, err)
+		return "", fmt.Errorf("read %s: %w", goModPath, err)
 	}
 	for line := range strings.Lines(string(body)) {
 		line = strings.TrimSpace(line)
@@ -77,7 +84,25 @@ func ImportPath(root string) (string, error) {
 			return mod, nil
 		}
 	}
-	return "", fmt.Errorf("no `module` directive in %s", path)
+	return "", fmt.Errorf("no `module` directive in %s", goModPath)
+}
+
+// ModuleImports resolves every module's import path from its
+// go.mod, returning the pairs the coverage gate (and any future
+// caller that maps `go tool` output back to repo-relative paths)
+// consume. A module whose go.mod is missing or malformed surfaces
+// as an error naming the failing module; the caller chooses
+// whether to abort or proceed.
+func ModuleImports(root string, mods []modules.Module) ([]modules.Import, error) {
+	out := make([]modules.Import, 0, len(mods))
+	for _, m := range mods {
+		ip, err := ModuleImportPath(filepath.Join(root, m.Dir, "go.mod"))
+		if err != nil {
+			return nil, fmt.Errorf("module %s: %w", m.Dir, err)
+		}
+		out = append(out, modules.Import{Dir: m.Dir, ImportPath: ip})
+	}
+	return out, nil
 }
 
 // Root returns the absolute path of the repository root by shelling

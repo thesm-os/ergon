@@ -65,7 +65,7 @@ var checkCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		importPath, err := discover.ImportPath(root)
+		imports, err := discover.ModuleImports(root, mods)
 		if err != nil {
 			return err
 		}
@@ -108,7 +108,7 @@ var checkCmd = &cobra.Command{
 			}},
 			{"coverage", func() error {
 				return coverage.Run(ctx, runner, stdout, stderr,
-					root, coverageDir, importPath+"/", cfg.Checks.Coverage,
+					root, coverageDir, imports, cfg.Checks.Coverage,
 					cfg.Checks.Excludes, cfg.Checks.Skips, coverage.RunOptions{})
 			}},
 			{"skip-expiry", func() error {

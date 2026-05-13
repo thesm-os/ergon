@@ -18,6 +18,7 @@ import (
 
 	"go.thesmos.sh/ergon/internal/checks/policy"
 	xexec "go.thesmos.sh/ergon/internal/exec"
+	"go.thesmos.sh/ergon/internal/modules"
 	"go.thesmos.sh/ergon/internal/style"
 )
 
@@ -41,10 +42,12 @@ type RunOptions struct {
 // emits a per-target report and fails any function whose coverage
 // falls below its layer's threshold.
 //
-// modulePrefix is the import-path prefix stripped from `go tool
-// cover` output to derive repo-relative paths matching the
-// schema's globs (typically `<importPath>/` from
-// `discover.ImportPath`).
+// imports pairs every workspace module with the import path it
+// declares in go.mod. Run uses the mapping to translate `go tool
+// cover` output (which prints full import paths) into repo-
+// relative paths so layer globs in `.ergon.yaml` can be written
+// uniformly across multi-module repositories where submodule
+// import paths diverge from the root.
 //
 // excludes and skips are the shared [policy.Exclude] and
 // [policy.Skip] lists; mutation reads the same lists. A function
@@ -53,7 +56,7 @@ type RunOptions struct {
 // under "skipped". Neither contributes to the failure count.
 func Run(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
-	root, coverageDir, modulePrefix string, cfg Config,
+	root, coverageDir string, imports []modules.Import, cfg Config,
 	excludes []policy.Exclude, skips []policy.Skip, opts RunOptions,
 ) error {
 	cfg = withDefaults(cfg)
@@ -92,11 +95,12 @@ func Run(
 		return fmt.Errorf("coverage: no matching targets for %v", opts.Targets)
 	}
 
+	prefixes := sortedPrefixes(imports)
 	s := style.Detect(stdout)
 	anyFailed := false
 
 	for _, target := range targets {
-		if renderTarget(stdout, s, target, rows, excludes, skips, modulePrefix, cfg.TopN, opts.Verbose, mergedBody) {
+		if renderTarget(stdout, s, target, rows, excludes, skips, prefixes, cfg.TopN, opts.Verbose, mergedBody) {
 			anyFailed = true
 		}
 	}
@@ -108,6 +112,47 @@ func Run(
 	}
 	s.FinalVerdict(stdout, true, "every gated function meets its layer threshold")
 	return nil
+}
+
+// sortedPrefixes returns imports sorted by descending ImportPath
+// length so [toRepoRelative] picks the most-specific module when
+// two share a prefix (e.g. `foo/proj` vs `foo/proj/cli`).
+func sortedPrefixes(imports []modules.Import) []modules.Import {
+	out := slices.Clone(imports)
+	sort.SliceStable(out, func(i, j int) bool {
+		return len(out[i].ImportPath) > len(out[j].ImportPath)
+	})
+	return out
+}
+
+// toRepoRelative converts a `go tool cover` path token (a full
+// import path like `go.example.com/proj/cli/internal/foo.go`)
+// into the repo-relative form `.ergon.yaml`'s layer globs match
+// against (e.g. `cli/internal/foo.go`).
+//
+// Matching iterates the sorted prefix list (longest-first) so a
+// submodule whose import path nests under another's wins over
+// the parent. A token with no matching import surfaces verbatim
+// — the caller sees an unfamiliar path rather than a silently
+// mis-classified row.
+func toRepoRelative(prefixes []modules.Import, p string) string {
+	for _, m := range prefixes {
+		if p == m.ImportPath {
+			if m.Dir == "." {
+				return ""
+			}
+			return m.Dir
+		}
+		if !strings.HasPrefix(p, m.ImportPath+"/") {
+			continue
+		}
+		rest := strings.TrimPrefix(p, m.ImportPath+"/")
+		if m.Dir == "." {
+			return rest
+		}
+		return m.Dir + "/" + rest
+	}
+	return p
 }
 
 // withDefaults fills any zero-value field on cfg from [Defaults].
@@ -178,7 +223,7 @@ func longestPrefixLayer(packages []Layer, t string) (Layer, bool) {
 func renderTarget(
 	stdout io.Writer, s style.Style, layer Layer,
 	rows []funcRow, excludes []policy.Exclude,
-	skips []policy.Skip, modulePrefix string, topN int, verbose bool,
+	skips []policy.Skip, prefixes []modules.Import, topN int, verbose bool,
 	mergedBody string,
 ) bool {
 	prefix := strings.TrimSuffix(layer.Path, "/...")
@@ -189,7 +234,7 @@ func renderTarget(
 		failures                                   []Failure
 	)
 	for _, r := range rows {
-		rel := strings.TrimPrefix(r.Path, modulePrefix)
+		rel := toRepoRelative(prefixes, r.Path)
 		if !strings.HasPrefix(rel, prefix+"/") && rel != prefix {
 			continue
 		}
@@ -237,7 +282,7 @@ func renderTarget(
 	}
 
 	if verbose {
-		writeUncoveredRanges(stdout, s, failures, modulePrefix, mergedBody)
+		writeUncoveredRanges(stdout, s, failures, prefixes, mergedBody)
 	}
 	fmt.Fprintln(stdout)
 	return true
@@ -248,7 +293,7 @@ func renderTarget(
 // failures. Ranges come from the merged coverprofile's `count=0`
 // rows.
 func writeUncoveredRanges(
-	w io.Writer, s style.Style, failures []Failure, modulePrefix, merged string,
+	w io.Writer, s style.Style, failures []Failure, prefixes []modules.Import, merged string,
 ) {
 	files := uniqueFiles(failures)
 	if len(files) == 0 {
@@ -267,7 +312,7 @@ func writeUncoveredRanges(
 		if !ok {
 			continue
 		}
-		rel := strings.TrimPrefix(path, modulePrefix)
+		rel := toRepoRelative(prefixes, path)
 		if !slices.Contains(files, rel) {
 			continue
 		}

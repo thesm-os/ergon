@@ -33,3 +33,19 @@ func (m Module) TagPrefix() string {
 	}
 	return m.Dir + "/"
 }
+
+// Import pairs a [Module]'s directory with the import path
+// declared in its go.mod. Consumers that need to map `go tool`
+// output (which prints full import paths) back to repo-relative
+// paths consume this mapping — in a multi-module repository every
+// submodule has its own import path, so a single root prefix is
+// insufficient.
+type Import struct {
+	// Dir is the module's directory relative to the repo root.
+	// Mirrors [Module.Dir]; `.` denotes the root module.
+	Dir string
+
+	// ImportPath is the value of the module's go.mod `module`
+	// directive.
+	ImportPath string
+}

@@ -13,6 +13,7 @@ import (
 
 	"go.thesmos.sh/ergon/internal/checks/policy"
 	xexec "go.thesmos.sh/ergon/internal/exec"
+	"go.thesmos.sh/ergon/internal/modules"
 	"go.thesmos.sh/ergon/internal/style"
 )
 
@@ -69,11 +70,13 @@ type funcSpan struct {
 // profiles; Uncovered merges them in memory and walks the
 // result.
 //
-// modulePrefix is stripped from every path so the report shows
-// repo-relative paths matching what editors and CI logs use.
+// imports pairs every workspace module with its declared import
+// path; Uncovered maps `go tool cover` output back to repo-
+// relative paths via the longest matching import prefix so reports
+// stay consistent across multi-module repositories.
 func Uncovered(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
-	root, coverageDir, modulePrefix string,
+	root, coverageDir string, imports []modules.Import,
 	cfg Config, excludes []policy.Exclude, skips []policy.Skip,
 	opts UncoveredOptions,
 ) error {
@@ -104,9 +107,10 @@ func Uncovered(
 	if err != nil {
 		return fmt.Errorf("coverage: go tool cover -func: %w", err)
 	}
-	spans := indexFunctionsByFile(funcLog, modulePrefix)
+	prefixes := sortedPrefixes(imports)
+	spans := indexFunctionsByFile(funcLog, prefixes)
 
-	byFileBlocks := collectUncoveredBlocks(mergedBody, modulePrefix)
+	byFileBlocks := collectUncoveredBlocks(mergedBody, prefixes)
 	grouped := groupByFunction(byFileBlocks, spans, cfg.Packages, excludes, skips, opts.All)
 	renderUncovered(stdout, s, grouped)
 	return nil
@@ -220,7 +224,7 @@ func stripPathToLayerPrefix(path string) string {
 // repo-relative file path. modulePrefix is stripped from every
 // path token so the keys match what the rest of ergon prints.
 // Blocks within each file are sorted by start line.
-func collectUncoveredBlocks(merged, modulePrefix string) map[string][]UncoveredBlock {
+func collectUncoveredBlocks(merged string, prefixes []modules.Import) map[string][]UncoveredBlock {
 	out := map[string][]UncoveredBlock{}
 	for line := range strings.SplitSeq(merged, "\n") {
 		if line == "" || strings.HasPrefix(line, "mode:") {
@@ -250,7 +254,7 @@ func collectUncoveredBlocks(merged, modulePrefix string) map[string][]UncoveredB
 		if err != nil {
 			continue
 		}
-		rel := strings.TrimPrefix(path, modulePrefix)
+		rel := toRepoRelative(prefixes, path)
 		out[rel] = append(out[rel], UncoveredBlock{
 			StartLine: startLine,
 			EndLine:   endLine,
@@ -270,7 +274,7 @@ func collectUncoveredBlocks(merged, modulePrefix string) map[string][]UncoveredB
 // look up the containing function for any line. Lines that do
 // not match the canonical `<path>:<line>:\t<func>\t<pct>` shape
 // (the `total:` row, blanks) are skipped.
-func indexFunctionsByFile(funcLog, modulePrefix string) map[string][]funcSpan {
+func indexFunctionsByFile(funcLog string, prefixes []modules.Import) map[string][]funcSpan {
 	out := map[string][]funcSpan{}
 	for line := range strings.SplitSeq(funcLog, "\n") {
 		fields := strings.Fields(line)
@@ -282,7 +286,7 @@ func indexFunctionsByFile(funcLog, modulePrefix string) map[string][]funcSpan {
 			continue
 		}
 		funcName := strings.Join(fields[1:len(fields)-1], " ")
-		rel := strings.TrimPrefix(path, modulePrefix)
+		rel := toRepoRelative(prefixes, path)
 		out[rel] = append(out[rel], funcSpan{StartLine: startLine, Func: funcName})
 	}
 	for _, spans := range out {

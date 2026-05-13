@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"go.thesmos.sh/ergon/internal/modules"
@@ -227,6 +228,69 @@ func TestResolve(t *testing.T) {
 			t.Fatal("Resolve err = nil outside git repo, want non-nil")
 		}
 	})
+}
+
+// TestModuleImports pins the per-module go.mod walk: each module
+// resolves to its declared import path; a missing go.mod surfaces
+// as an error naming the failing module.
+func TestModuleImports(t *testing.T) {
+	t.Parallel()
+
+	t.Run("happy path returns one Import per module", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeMod(t, filepath.Join(root, "go.mod"), "module go.example.com/proj\n")
+		writeMod(t, filepath.Join(root, "cli", "go.mod"), "module go.example.com/proj/cli\n")
+		writeMod(t, filepath.Join(root, "backend"), "") // dir without go.mod for the failure case
+
+		mods := []modules.Module{{Dir: "."}, {Dir: "cli"}}
+		got, err := ModuleImports(root, mods)
+		if err != nil {
+			t.Fatalf("ModuleImports err: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("got %d entries, want 2", len(got))
+		}
+		if got[0].Dir != "." || got[0].ImportPath != "go.example.com/proj" {
+			t.Errorf("got[0] = %+v", got[0])
+		}
+		if got[1].Dir != "cli" || got[1].ImportPath != "go.example.com/proj/cli" {
+			t.Errorf("got[1] = %+v", got[1])
+		}
+	})
+
+	t.Run("missing go.mod surfaces wrapped with the module dir", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeMod(t, filepath.Join(root, "go.mod"), "module go.example.com/proj\n")
+		mods := []modules.Module{{Dir: "."}, {Dir: "nope"}}
+		_, err := ModuleImports(root, mods)
+		if err == nil {
+			t.Fatal("ModuleImports err = nil, want missing-go.mod failure")
+		}
+		if !strings.Contains(err.Error(), "nope") {
+			t.Fatalf("err = %v, want it to name the failing module", err)
+		}
+	})
+}
+
+// writeMod writes go.mod-style body to path, creating parent dirs
+// as needed. An empty body skips file creation (so the caller can
+// stage a dir-with-no-go.mod fixture).
+func writeMod(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if body == "" {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+		return
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
 }
 
 // initGitRepo creates a tempdir, runs `git init` inside it, and
