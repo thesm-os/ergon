@@ -82,4 +82,89 @@ func TestValidate(t *testing.T) {
 			t.Fatalf("err = %v, want feat to be rejected for this Config", err)
 		}
 	})
+
+	t.Run("breaking-change marker on bare type passes", func(t *testing.T) {
+		t.Parallel()
+		if err := Validate("feat!: drop the v0 API", Defaults()); err != nil {
+			t.Fatalf("Validate err: %v, want feat! to be accepted", err)
+		}
+	})
+
+	t.Run("breaking-change marker with scope passes", func(t *testing.T) {
+		t.Parallel()
+		if err := Validate("refactor(api)!: rename Endpoint to Route", Defaults()); err != nil {
+			t.Fatalf("Validate err: %v, want refactor(api)! to be accepted", err)
+		}
+	})
+
+	t.Run("scope-enum allows listed scopes", func(t *testing.T) {
+		t.Parallel()
+		cfg := Config{Scopes: []string{"api", "cli"}}
+		if err := Validate("feat(api): new endpoint", cfg); err != nil {
+			t.Fatalf("Validate err: %v, want api scope to be accepted", err)
+		}
+	})
+
+	t.Run("scope-enum rejects unlisted scopes", func(t *testing.T) {
+		t.Parallel()
+		cfg := Config{Scopes: []string{"api", "cli"}}
+		err := Validate("feat(nope): something", cfg)
+		if !errors.Is(err, ErrUnknownScope) {
+			t.Fatalf("err = %v, want ErrUnknownScope", err)
+		}
+	})
+
+	t.Run("scope-enum still accepts commits without a scope", func(t *testing.T) {
+		t.Parallel()
+		cfg := Config{Scopes: []string{"api", "cli"}}
+		if err := Validate("feat: scopeless", cfg); err != nil {
+			t.Fatalf("Validate err: %v, want scopeless to be accepted", err)
+		}
+	})
+
+	t.Run("empty scopes (default) accepts any scope", func(t *testing.T) {
+		t.Parallel()
+		if err := Validate("feat(anything-goes): foo", Defaults()); err != nil {
+			t.Fatalf("Validate err: %v, want any scope under default config", err)
+		}
+	})
+
+	t.Run("body without leading blank line fails", func(t *testing.T) {
+		t.Parallel()
+		msg := "feat: add flag\nthis is body without blank line"
+		err := Validate(msg, Defaults())
+		if !errors.Is(err, ErrBodyLeadingBlankMissing) {
+			t.Fatalf("err = %v, want ErrBodyLeadingBlankMissing", err)
+		}
+	})
+
+	t.Run("over-length body line fails", func(t *testing.T) {
+		t.Parallel()
+		long := strings.Repeat("x", 120)
+		msg := "feat: add flag\n\n" + long
+		err := Validate(msg, Defaults())
+		if !errors.Is(err, ErrBodyLineTooLong) {
+			t.Fatalf("err = %v, want ErrBodyLineTooLong", err)
+		}
+	})
+
+	t.Run("body line at exactly the limit passes", func(t *testing.T) {
+		t.Parallel()
+		atLimit := strings.Repeat("x", 100)
+		msg := "feat: add flag\n\n" + atLimit
+		if err := Validate(msg, Defaults()); err != nil {
+			t.Fatalf("Validate err: %v, want body line of 100 chars to pass", err)
+		}
+	})
+
+	t.Run("comment lines are stripped before checks run", func(t *testing.T) {
+		t.Parallel()
+		// git includes a status block as `# ...` lines in
+		// COMMIT_EDITMSG. Those lines are long but never enter
+		// the recorded message and must not trip body checks.
+		msg := "feat: add flag\n\nReal body line.\n# " + strings.Repeat("x", 200)
+		if err := Validate(msg, Defaults()); err != nil {
+			t.Fatalf("Validate err: %v, want `#` comment lines to be ignored", err)
+		}
+	})
 }

@@ -194,5 +194,13 @@ checks:
       - perf
       - build
       - revert
+    # Optional closed set of accepted scopes. Empty (the default)
+    # leaves scopes free-form — commits without a scope or with
+    # any scope name are accepted. Set to constrain `(scope)` to
+    # a named list, e.g. ["api", "cli", "internal"]; scope-less
+    # commits still pass when the list is set.
+    scopes: []
     # Maximum length (in bytes) of the commit subject line.
     max_subject_length: 72
+    # Maximum length (in bytes) of each body or footer line.
+    body_max_line_length: 100
