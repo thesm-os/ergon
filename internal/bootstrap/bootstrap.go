@@ -23,8 +23,8 @@ const VersionLatest = "latest"
 // ergon shells out to: gofumpt and gci handle formatting,
 // golangci-lint is the umbrella linter, govulncheck powers
 // `ergon check vuln`, go-license applies SPDX headers, benchstat
-// backs `ergon bench regression`, and gremlins backs
-// `ergon check mutation`.
+// backs `ergon bench regression`, gremlins backs
+// `ergon check mutation`, and gobco backs `ergon check branch`.
 var DefaultTools = []ToolSpec{
 	{Pkg: "mvdan.cc/gofumpt", Version: VersionLatest},
 	{Pkg: "github.com/daixiang0/gci", Version: VersionLatest},
@@ -33,6 +33,7 @@ var DefaultTools = []ToolSpec{
 	{Pkg: "github.com/palantir/go-license", Version: VersionLatest},
 	{Pkg: "golang.org/x/perf/cmd/benchstat", Version: VersionLatest},
 	{Pkg: "github.com/go-gremlins/gremlins/cmd/gremlins", Version: VersionLatest},
+	{Pkg: "github.com/rillig/gobco", Version: VersionLatest},
 }
 
 // markdownlintHint is surfaced when neither markdownlint-cli2 nor

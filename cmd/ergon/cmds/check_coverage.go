@@ -4,24 +4,25 @@
 package cmds
 
 import (
-	"path/filepath"
-
 	"github.com/spf13/cobra"
 
 	"go.thesmos.sh/ergon/internal/checks/coverage"
-	"go.thesmos.sh/ergon/internal/discover"
 	xexec "go.thesmos.sh/ergon/internal/exec"
+	"go.thesmos.sh/ergon/internal/test"
 )
 
-// coverageVerbose toggles the "Uncovered ranges" dump in the
-// per-target report. Bound to `--ranges` on [checkCoverageCmd];
-// the root `-v / --verbose` flag is reserved for the
-// stream-vs-buffer toggle so it carries its own name here.
-var coverageVerbose bool
+// checkCoverageFlags groups the local flags `ergon check coverage`
+// exposes. --ranges toggles the per-target uncovered-block dump;
+// --no-test skips the integrated test run that produces fresh
+// profiles, falling back to whatever `.out` files happen to exist.
+var checkCoverageFlags struct {
+	ranges bool
+	noTest bool
+}
 
-// checkCoverageCmd is `ergon check coverage`. Reads the
-// layered-threshold schema, merges per-module `.out` profiles
-// under the coverage directory, and fails any function below its
+// checkCoverageCmd is `ergon check coverage`. Runs the test suite
+// (producing fresh per-module `.out` profiles), merges them,
+// invokes `go tool cover -func`, and fails any function below its
 // layer's minimum coverage.
 //
 // Positional arguments restrict the run to a subset of the
@@ -31,39 +32,43 @@ var coverageVerbose bool
 var checkCoverageCmd = &cobra.Command{
 	Use:   "coverage [target...]",
 	Short: "Enforce per-layer coverage thresholds",
-	Long: "Reads the per-layer thresholds from `.ergon.yaml`'s " +
-		"`checks.coverage` section, merges the per-module `.out` " +
-		"profiles produced by `ergon test`, runs `go tool cover -func`, " +
-		"and fails any function below its layer's minimum coverage.\n\n" +
+	Long: "Runs `ergon test` to produce fresh per-module `.out` profiles, " +
+		"merges them, runs `go tool cover -func`, and fails any function " +
+		"below its layer's minimum coverage as declared under " +
+		"`.ergon.yaml`'s `checks.coverage` section.\n\n" +
 		"Positional arguments restrict the run to specific layer prefixes; " +
 		"with none, every configured layer is exercised. The --ranges flag " +
-		"appends the uncovered block ranges for every failing target.",
+		"appends the uncovered block ranges for every failing target. The " +
+		"--no-test flag skips the integrated test run and operates on " +
+		"whatever profiles already exist (useful when iterating on " +
+		"thresholds without paying for a re-run).",
 	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
-		root, mods, err := discover.Resolve(ctx, cfg.Modules)
+		stdout, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
+		runner := xexec.Command{}
+
+		in, err := testInputs(ctx)
 		if err != nil {
 			return err
 		}
-		imports, err := discover.ModuleImports(root, mods)
-		if err != nil {
-			return err
+		if !checkCoverageFlags.noTest {
+			if err := test.Run(ctx, runner, stdout, stderr,
+				in, cfg.Test, test.Override{}, stageOpts()); err != nil {
+				return err
+			}
 		}
-		name := cfg.Name
-		if name == "" {
-			name = filepath.Base(root)
-		}
-		coverageDir := filepath.Join(root, "."+name, "coverage")
-		return coverage.Run(ctx, xexec.Command{},
-			cmd.OutOrStdout(), cmd.ErrOrStderr(),
-			root, coverageDir, imports, cfg.Checks.Coverage,
+		return coverage.Run(ctx, runner, stdout, stderr,
+			in.Root, in.CoverageDir, in.Imports, cfg.Checks.Coverage,
 			cfg.Checks.Excludes, cfg.Checks.Skips,
-			coverage.RunOptions{Targets: args, Verbose: coverageVerbose})
+			coverage.RunOptions{Targets: args, Verbose: checkCoverageFlags.ranges})
 	},
 }
 
 func init() {
-	checkCoverageCmd.Flags().BoolVar(&coverageVerbose, "ranges", false,
+	checkCoverageCmd.Flags().BoolVar(&checkCoverageFlags.ranges, "ranges", false,
 		"dump uncovered block ranges (file:start-end (stmts)) for every failing target")
+	checkCoverageCmd.Flags().BoolVar(&checkCoverageFlags.noTest, "no-test", false,
+		"skip the integrated `ergon test` run; operate on existing profiles")
 	checkCmd.AddCommand(checkCoverageCmd)
 }

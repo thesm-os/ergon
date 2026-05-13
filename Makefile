@@ -2,7 +2,7 @@
         lint lint-md tidy check-tidy \
         test test-race test-bench test-fuzz test-coverage \
         bench-baseline bench-regression bench-profile \
-        check check-coverage check-uncovered check-mutation check-vuln \
+        check check-coverage check-uncovered check-mutation check-branch check-vuln \
         release
 
 # ergon dogfoods itself. `go run` keeps the dev loop snappy
@@ -69,6 +69,8 @@ check-uncovered: ## List every uncovered line across the tree (ignores layer con
 	$(ERGON) check coverage uncovered
 check-mutation: ## Run gremlins mutation testing per layer (slow)
 	$(ERGON) check mutation
+check-branch: ## Run gobco branch-coverage gating per layer (slow)
+	$(ERGON) check branch
 check-vuln: ## Run govulncheck per module
 	$(ERGON) check vuln
 

@@ -65,7 +65,8 @@ func coverageOne(
 	}
 
 	var funcOut bytes.Buffer
-	if err := runner.Run(ctx,
+	if err := runner.Run(
+		ctx,
 		xexec.Options{Dir: root, Stdout: &funcOut, Stderr: &funcOut},
 		"go", "tool", "cover", "-func="+profile,
 	); err != nil {
@@ -74,7 +75,8 @@ func coverageOne(
 
 	html := strings.TrimSuffix(profile, ".out") + ".html"
 	var htmlErr bytes.Buffer
-	if err := runner.Run(ctx,
+	if err := runner.Run(
+		ctx,
 		xexec.Options{Dir: root, Stdout: io.Discard, Stderr: &htmlErr},
 		"go", "tool", "cover", "-html="+profile, "-o", html,
 	); err != nil {

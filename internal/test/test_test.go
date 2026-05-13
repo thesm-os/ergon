@@ -68,6 +68,48 @@ func TestRun(t *testing.T) {
 		}
 	})
 
+	t.Run("imports propagate as a -coverpkg flag", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{}
+		in := Inputs{
+			Root:    "/repo",
+			Modules: []modules.Module{{Dir: "."}},
+			Imports: []modules.Import{
+				{Dir: ".", ImportPath: "go.example.com/proj"},
+				{Dir: "cli", ImportPath: "go.example.com/proj/cli"},
+			},
+			CoverageDir: t.TempDir(),
+		}
+		err := Run(t.Context(), runner, io.Discard, io.Discard, in,
+			Defaults(), Override{}, stage.Options{})
+		if err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		want := "-coverpkg=go.example.com/proj/...,go.example.com/proj/cli/..."
+		if !slices.Contains(runner.calls[0].args, want) {
+			t.Fatalf("args = %+v, want %q", runner.calls[0].args, want)
+		}
+	})
+
+	t.Run("no imports omits -coverpkg (back to per-module-only)", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{}
+		in := Inputs{
+			Root: "/repo", Modules: []modules.Module{{Dir: "."}},
+			CoverageDir: t.TempDir(),
+		}
+		err := Run(t.Context(), runner, io.Discard, io.Discard, in,
+			Defaults(), Override{}, stage.Options{})
+		if err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		for _, a := range runner.calls[0].args {
+			if strings.HasPrefix(a, "-coverpkg=") {
+				t.Fatalf("unexpected -coverpkg flag with empty imports: %q", a)
+			}
+		}
+	})
+
 	t.Run("empty coverage dir disables coverage flag", func(t *testing.T) {
 		t.Parallel()
 		runner := &fakeRunner{}
@@ -83,6 +125,27 @@ func TestRun(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestCoverPkgArg pins the workspace-wide instrumentation arg
+// builder: empty → empty (caller omits the flag); one or more
+// imports → comma-separated `<ip>/...` wildcards.
+func TestCoverPkgArg(t *testing.T) {
+	t.Parallel()
+
+	if got := coverPkgArg(nil); got != "" {
+		t.Fatalf("empty imports → %q, want empty", got)
+	}
+
+	got := coverPkgArg([]modules.Import{
+		{Dir: ".", ImportPath: "go.example.com/proj"},
+		{Dir: "cli", ImportPath: "go.example.com/proj/cli"},
+		{Dir: "backend", ImportPath: "go.example.com/proj/backend"},
+	})
+	want := "go.example.com/proj/...,go.example.com/proj/cli/...,go.example.com/proj/backend/..."
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
 }
 
 // TestRunOverride pins the [Override] semantics on [Run]: zero

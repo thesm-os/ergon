@@ -73,6 +73,10 @@ func testInputs(ctx context.Context) (test.Inputs, error) {
 	if err != nil {
 		return test.Inputs{}, err
 	}
+	imports, err := discover.ModuleImports(root, mods)
+	if err != nil {
+		return test.Inputs{}, err
+	}
 	name := cfg.Name
 	if name == "" {
 		name = filepath.Base(root)
@@ -80,6 +84,7 @@ func testInputs(ctx context.Context) (test.Inputs, error) {
 	return test.Inputs{
 		Root:        root,
 		Modules:     mods,
+		Imports:     imports,
 		CoverageDir: filepath.Join(root, "."+name, "coverage"),
 	}, nil
 }

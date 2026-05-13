@@ -12,8 +12,10 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"go.thesmos.sh/ergon/internal/checks/branch"
 	"go.thesmos.sh/ergon/internal/checks/coverage"
 	"go.thesmos.sh/ergon/internal/checks/errorprefix"
+	"go.thesmos.sh/ergon/internal/checks/mutation"
 	"go.thesmos.sh/ergon/internal/checks/skipexpiry"
 	"go.thesmos.sh/ergon/internal/checks/vuln"
 	"go.thesmos.sh/ergon/internal/discover"
@@ -31,30 +33,40 @@ func stageOpts() stage.Options {
 	return stage.Options{Fast: fastMode, Verbose: verboseMode}
 }
 
-// checkCmd is `ergon check`. Bare invocation runs the full
+// checkCmd is `ergon check`. Bare invocation runs the umbrella
 // pre-merge gate: mod verify → lint → test (which produces the
 // coverage profiles) → coverage thresholds → skip-expiry →
-// error-prefix → vuln.
+// error-prefix → vuln, plus the two slow gates when the user has
+// opted in via `.ergon.yaml`:
+//
+//   - mutation: runs when `checks.mutation.packages` is non-empty
+//     (declaring per-layer score / coverage thresholds).
+//   - branch:   runs when any layer under `checks.coverage.packages`
+//     sets `require_branch: true`.
+//
+// Both gates are minutes-slow per layer (gremlins re-runs the
+// test suite against mutated source; gobco rebuilds each package
+// under test), so the umbrella stays fast when neither is
+// declared. Subcommands (`ergon check mutation`, `ergon check
+// branch`) are always available regardless of configuration.
 //
 // Aggregation: by default every stage runs even if an earlier one
 // failed, and a closing summary block lists each stage's verdict
 // so the user sees every problem at once. Pass `--fast` / `-f` to
 // short-circuit at the first stage failure (the dev-loop
 // ergonomic).
-//
-// Mutation testing (`ergon check mutation`) is intentionally NOT
-// part of the umbrella. `gremlins unleash` runs minutes per layer
-// and is not suitable for a pre-merge gate; run it explicitly via
-// the subcommand on a nightly cadence or before a release.
 var checkCmd = &cobra.Command{
 	Use:   "check",
 	Short: "Run the full pre-merge gate",
 	Long: "Runs the umbrella check sequence: mod verify, lint, test, " +
-		"coverage, skip-expiry, error-prefix, and vuln. By default every " +
-		"stage runs and the closing summary lists each stage's verdict; " +
-		"pass --fast (-f) to abort at the first failure. Subcommands run " +
-		"individual stages.\n\nMutation testing is excluded — it is slow " +
-		"and belongs in a nightly job. Run `ergon check mutation` explicitly.",
+		"coverage, skip-expiry, error-prefix, and vuln. The mutation " +
+		"and branch gates are appended automatically when their " +
+		"respective `.ergon.yaml` thresholds are declared (mutation: " +
+		"`checks.mutation.packages` non-empty; branch: any coverage " +
+		"layer with `require_branch: true`).\n\nBy default every stage " +
+		"runs and the closing summary lists each stage's verdict; pass " +
+		"--fast (-f) to abort at the first failure. Subcommands run " +
+		"individual stages.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		ctx := cmd.Context()
@@ -136,6 +148,36 @@ var checkCmd = &cobra.Command{
 			{"vuln", func() error { return vuln.Run(ctx, runner, stdout, stderr, root, mods, opts) }},
 		}
 
+		// The mutation and branch gates are opt-in per configuration:
+		// they run only when the user has declared per-layer
+		// thresholds (mutation.packages non-empty; coverage layer
+		// with require_branch: true). Both are slow — gremlins
+		// re-runs the test suite against mutated source, gobco
+		// rebuilds each package under test — so the umbrella stays
+		// fast when neither is configured.
+		if len(cfg.Checks.Mutation.Packages) > 0 {
+			stages = append(stages, checkStage{
+				name: "mutation",
+				run: func() error {
+					return mutation.Run(ctx, runner, stdout, stderr,
+						root, cfg.Checks.Mutation,
+						cfg.Checks.Excludes, cfg.Checks.Skips,
+						mutation.RunOptions{})
+				},
+			})
+		}
+		if anyRequiresBranch(cfg.Checks.Coverage.Packages) {
+			stages = append(stages, checkStage{
+				name: "branch",
+				run: func() error {
+					return branch.Run(ctx, runner, stdout, stderr,
+						root, imports, cfg.Checks.Coverage,
+						cfg.Checks.Excludes, cfg.Checks.Skips,
+						branch.RunOptions{})
+				},
+			})
+		}
+
 		s := style.Detect(stdout)
 		results := make([]style.StageResult, 0, len(stages))
 		var failures []error
@@ -171,6 +213,20 @@ var checkCmd = &cobra.Command{
 type checkStage struct {
 	name string
 	run  func() error
+}
+
+// anyRequiresBranch reports whether at least one declared layer
+// in `.ergon.yaml` sets `require_branch: true`. The umbrella uses
+// this signal to opt-in the gobco-backed branch gate: a workspace
+// without any required layer skips the (slow) gobco pass
+// entirely, while a single `require_branch: true` flips it on.
+func anyRequiresBranch(layers []coverage.Layer) bool {
+	for _, l := range layers {
+		if l.RequireBranch {
+			return true
+		}
+	}
+	return false
 }
 
 // init attaches checkCmd to the root. Subcommand files attach

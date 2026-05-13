@@ -29,6 +29,15 @@ type Inputs struct {
 	// Modules is the per-module iteration set.
 	Modules []modules.Module
 
+	// Imports pairs every workspace module with the import path
+	// declared in its go.mod. When non-empty and coverage is on,
+	// the test runner builds `-coverpkg=<m1>/...,<m2>/...,…` so a
+	// test in one module instruments code in every workspace
+	// module it touches — cross-module coverage flows into the
+	// merged profile the gate reads. Empty disables `-coverpkg`
+	// (the legacy per-module-only behaviour).
+	Imports []modules.Import
+
 	// CoverageDir is the absolute directory where per-module
 	// coverage profiles are written. The caller is responsible for
 	// composing the path (typically `<root>/.<project>/coverage`).
@@ -69,6 +78,9 @@ func Run(
 			args = appendRunFlag(args, ov.Pattern)
 			if in.CoverageDir != "" {
 				args = append(args, "-coverprofile="+coverageFile(in.CoverageDir, m))
+				if pkg := coverPkgArg(in.Imports); pkg != "" {
+					args = append(args, "-coverpkg="+pkg)
+				}
 			}
 			args = append(args, "./...")
 			return stage.RunAllowSkip(ctx, runner, opts,
@@ -173,6 +185,29 @@ func coverageFile(coverageDir string, m modules.Module) string {
 	}
 	name = strings.ReplaceAll(name, "/", "_")
 	return filepath.Join(coverageDir, name+".out")
+}
+
+// coverPkgArg builds the `-coverpkg=` value `go test` consumes
+// from a list of workspace modules. Each module contributes a
+// `<importPath>/...` wildcard so the entry instruments every
+// package under that module. Returns the empty string when
+// imports is empty — the caller omits `-coverpkg` entirely in
+// that case, falling back to Go's default of "only packages
+// being tested are instrumented".
+//
+// The cross-module instrumentation lets a test in module A
+// record coverage for code it executes in module B; a test
+// running per-module without `-coverpkg` would only ever
+// instrument A's own packages.
+func coverPkgArg(imports []modules.Import) string {
+	if len(imports) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(imports))
+	for _, ip := range imports {
+		parts = append(parts, ip.ImportPath+"/...")
+	}
+	return strings.Join(parts, ",")
 }
 
 // appendRunFlag appends `-run=<pattern>` to args when pattern is

@@ -98,7 +98,16 @@ func Run(
 	// 80% takes those rows out of a parent `backend/...` at 90%).
 	rowClaim := claimRows(cfg.Packages, prefixes, rows)
 
-	targets, claimIdx := selectTargets(cfg.Packages, opts.Targets)
+	// Per-layer aggregate statement coverage. Drives the PASS /
+	// FAIL verdict; the per-function rows above remain as the
+	// failure-diagnostic table only. Matches `go test -cover`'s
+	// "X% of statements" semantics so what the runner shows and
+	// what the gate enforces agree.
+	funcSpans := indexFunctionsByFile(funcLog, prefixes)
+	layerAgg := aggregateByLayer(mergedBody, cfg.Packages, prefixes,
+		excludes, skips, funcSpans)
+
+	targets, claimIdx := SelectTargets(cfg.Packages, opts.Targets)
 	if len(targets) == 0 {
 		return fmt.Errorf("coverage: no matching targets for %v", opts.Targets)
 	}
@@ -108,7 +117,8 @@ func Run(
 
 	for i, target := range targets {
 		failed := renderTarget(stdout, s, target, claimIdx[i],
-			rows, rowClaim, excludes, skips, prefixes,
+			rows, rowClaim, layerAgg[claimIdx[i]],
+			excludes, skips, prefixes,
 			cfg.TopN, opts.Verbose, mergedBody)
 		if failed {
 			anyFailed = true
@@ -139,6 +149,116 @@ func layerMatchPrefix(layerPath string) string {
 	return p
 }
 
+// layerStats records the per-layer aggregate statement coverage
+// — the headline number the gate verdict compares to
+// [Layer.Line]. Matches `go test -cover`'s reported percentage so
+// the runner output and the gate agree.
+type layerStats struct {
+	// TotalStmts is the number of statements claimed by the
+	// layer after excludes and skips drop ineligible blocks.
+	TotalStmts int
+
+	// CoveredStmts is the subset of TotalStmts whose execution
+	// count was > 0 in the merged coverprofile.
+	CoveredStmts int
+}
+
+// Pct returns the layer's aggregate coverage percentage in the
+// half-open interval [0, 100]. Returns 0 when the layer has zero
+// claimed statements so an empty layer never fails the gate by
+// accident.
+func (s layerStats) Pct() float64 {
+	if s.TotalStmts == 0 {
+		return 0
+	}
+	return float64(s.CoveredStmts) * 100 / float64(s.TotalStmts)
+}
+
+// aggregateByLayer attributes every block in the merged
+// coverprofile to its longest-prefix declared layer in packages,
+// applies excludes (file-path glob) and skips (func name + file
+// glob), and returns one [layerStats] entry per declared layer.
+//
+// Blocks are deduplicated before accumulation: with cross-module
+// `-coverpkg`, the same source block appears in multiple
+// per-module profiles. The key (path + span) holds the SUM of
+// execution counts across every appearance — matching the
+// dedup-and-sum behaviour `go tool cover -func` applies to a
+// merged profile.
+//
+// Blocks whose containing layer is unknown (no declared layer
+// matches and no wildcard exists) are dropped silently — the
+// gate cannot enforce a threshold on rows it has no layer for.
+func aggregateByLayer(
+	merged string, packages []Layer, prefixes []modules.Import,
+	excludes []policy.Exclude, skips []policy.Skip,
+	funcSpans map[string][]funcSpan,
+) []layerStats {
+	type blockKey struct {
+		path string // raw import-path form, dedup uses the literal token
+		span string // `<sline>.<scol>,<eline>.<ecol>`
+	}
+	type blockAgg struct {
+		stmts int
+		count int
+	}
+	blocks := map[blockKey]*blockAgg{}
+	for line := range strings.SplitSeq(merged, "\n") {
+		if line == "" || strings.HasPrefix(line, "mode:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		path, span, ok := splitProfileHead(fields[0])
+		if !ok {
+			continue
+		}
+		stmts, err := strconv.Atoi(fields[1])
+		if err != nil {
+			continue
+		}
+		count, err := strconv.Atoi(fields[2])
+		if err != nil {
+			continue
+		}
+		key := blockKey{path: path, span: span}
+		agg, found := blocks[key]
+		if !found {
+			agg = &blockAgg{stmts: stmts}
+			blocks[key] = agg
+		}
+		agg.count += count
+	}
+
+	out := make([]layerStats, len(packages))
+	for key, agg := range blocks {
+		rel := toRepoRelative(prefixes, key.path)
+		idx := LongestPrefixLayerIdx(packages, rel)
+		if idx < 0 {
+			continue
+		}
+		if policy.MatchesExclude(rel, excludes) {
+			continue
+		}
+		startEnd := strings.SplitN(key.span, ",", 2)
+		startLine, err := strconv.Atoi(strings.SplitN(startEnd[0], ".", 2)[0])
+		if err != nil {
+			continue
+		}
+		funcName := functionAt(funcSpans[rel], startLine)
+		if policy.MatchesSkip(funcName, rel, skips) {
+			continue
+		}
+		out[idx].TotalStmts += agg.stmts
+		if agg.count > 0 {
+			out[idx].CoveredStmts += agg.stmts
+		}
+	}
+	return out
+}
+
 // claimRows assigns every row to a declared-layer index in
 // cfg.Packages — the layer with the longest prefix that covers
 // the row's repo-relative path. A row that no layer covers (and
@@ -152,16 +272,16 @@ func layerMatchPrefix(layerPath string) string {
 func claimRows(packages []Layer, prefixes []modules.Import, rows []funcRow) []int {
 	out := make([]int, len(rows))
 	for i, r := range rows {
-		out[i] = longestPrefixLayerIdx(packages, toRepoRelative(prefixes, r.Path))
+		out[i] = LongestPrefixLayerIdx(packages, toRepoRelative(prefixes, r.Path))
 	}
 	return out
 }
 
-// longestPrefixLayerIdx returns the index of the declared layer
+// LongestPrefixLayerIdx returns the index of the declared layer
 // with the longest base that covers rel, or -1 when no layer
 // matches. The wildcard sentinel (`./...`) covers every row at
 // length zero so concrete layers always win when both apply.
-func longestPrefixLayerIdx(packages []Layer, rel string) int {
+func LongestPrefixLayerIdx(packages []Layer, rel string) int {
 	bestIdx := -1
 	bestLen := -1
 	for i, p := range packages {
@@ -227,7 +347,7 @@ func withDefaults(cfg Config) Config {
 	return cfg
 }
 
-// selectTargets filters cfg.Packages by the user-supplied
+// SelectTargets filters cfg.Packages by the user-supplied
 // targets. With no targets every package is selected as declared.
 //
 // For each requested target, the longest-prefix matching layer
@@ -235,7 +355,7 @@ func withDefaults(cfg Config) Config {
 // request. This mirrors the per-function classification rule:
 // when two layers overlap (e.g. `internal/...` and
 // `internal/checks/...`), only the more-specific one applies.
-func selectTargets(packages []Layer, requested []string) ([]Layer, []int) {
+func SelectTargets(packages []Layer, requested []string) ([]Layer, []int) {
 	if len(requested) == 0 {
 		idxs := make([]int, len(packages))
 		for i := range packages {
@@ -314,12 +434,22 @@ func longestPrefixLayer(packages []Layer, t string) (Layer, bool) {
 	return best, bestLen >= 0
 }
 
-// renderTarget classifies every function under a single layer
-// and writes the per-target section to stdout. Returns true when
-// at least one function failed the threshold check.
+// renderTarget writes one per-layer section: header, the
+// aggregate coverage line, the PASS/FAIL verdict (driven by the
+// aggregate), and — only when the layer fails — a "lowest-
+// coverage functions" diagnostic table so the reader can see
+// where the deficit lives. Returns true when the layer's
+// aggregate is below [Layer.Line].
+//
+// The aggregate matches `go test -cover ./<layer>/...`: per-block
+// statement coverage summed across the layer, excludes and skips
+// applied at block granularity. Individual functions never drive
+// the verdict — a layer with one untested handler still passes
+// if the rest of the layer covers enough statements to clear the
+// bar.
 func renderTarget(
 	stdout io.Writer, s style.Style, layer Layer, claimIdx int,
-	rows []funcRow, rowClaim []int,
+	rows []funcRow, rowClaim []int, agg layerStats,
 	excludes []policy.Exclude,
 	skips []policy.Skip, prefixes []modules.Import, topN int, verbose bool,
 	mergedBody string,
@@ -328,9 +458,13 @@ func renderTarget(
 	header := strings.TrimSuffix(layer.Path, "/...")
 	s.Header(stdout, header, fmt.Sprintf("line ≥ %d%%", layer.Line))
 
+	// Per-function pass/below counts retained as a diagnostic
+	// detail; they no longer drive the verdict. Excluded and
+	// skipped rows are tracked so the user can see the policy
+	// took effect even though the aggregate is the threshold.
 	var (
-		total, passing, failing, skipped, excluded int
-		failures                                   []Failure
+		passing, below, skipped, excluded int
+		failures                          []Failure
 	)
 	for i, r := range rows {
 		// Specificity-wins: a row belongs to the rendered target
@@ -344,11 +478,6 @@ func renderTarget(
 		if prefix != "" && !strings.HasPrefix(rel, prefix+"/") && rel != prefix {
 			continue
 		}
-		total++
-		if int(r.Pct) >= layer.Line {
-			passing++
-			continue
-		}
 		if policy.MatchesExclude(rel, excludes) {
 			excluded++
 			continue
@@ -357,17 +486,26 @@ func renderTarget(
 			skipped++
 			continue
 		}
-		failing++
+		if int(r.Pct) >= layer.Line {
+			passing++
+			continue
+		}
+		below++
 		failures = append(failures, Failure{
 			Path: rel, Func: r.Func, Pct: r.Pct, Threshold: layer.Line, Layer: prefix,
 		})
 	}
 
+	pct := agg.Pct()
+	pass := pct >= float64(layer.Line)
 	fmt.Fprintf(stdout,
-		"  Functions:  %d total · %d ≥ threshold · %d below · %d skipped · %d excluded\n",
-		total, passing, failing, skipped, excluded)
+		"  Coverage:   %5.1f%%  (%d / %d statements covered)\n",
+		pct, agg.CoveredStmts, agg.TotalStmts)
+	fmt.Fprintf(stdout,
+		"  Functions:  %d ≥ threshold · %d below · %d skipped · %d excluded\n",
+		passing, below, skipped, excluded)
 
-	if failing == 0 {
+	if pass {
 		fmt.Fprintf(stdout, "  Verdict:    %s\n\n", s.Verdict(true))
 		return false
 	}
@@ -378,13 +516,15 @@ func renderTarget(
 		return failures[i].Pct < failures[j].Pct
 	})
 
-	fmt.Fprintf(stdout, "  %s\n", s.Bolded("Functions below threshold"))
-	limit := min(topN, len(failures))
-	for _, f := range failures[:limit] {
-		fmt.Fprintf(stdout, "    %5.1f%%  %s  %s\n", f.Pct, f.Path, s.Dimmed(f.Func))
-	}
-	if len(failures) > limit {
-		fmt.Fprintf(stdout, "    %s\n", s.Dimmed(fmt.Sprintf("… and %d more function(s)", len(failures)-limit)))
+	if len(failures) > 0 {
+		fmt.Fprintf(stdout, "  %s\n", s.Bolded("Lowest-coverage functions"))
+		limit := min(topN, len(failures))
+		for _, f := range failures[:limit] {
+			fmt.Fprintf(stdout, "    %5.1f%%  %s  %s\n", f.Pct, f.Path, s.Dimmed(f.Func))
+		}
+		if len(failures) > limit {
+			fmt.Fprintf(stdout, "    %s\n", s.Dimmed(fmt.Sprintf("… and %d more function(s)", len(failures)-limit)))
+		}
 	}
 
 	if verbose {
