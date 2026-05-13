@@ -15,6 +15,8 @@ package config
 
 import (
 	"go.thesmos.sh/ergon/internal/bootstrap"
+	"go.thesmos.sh/ergon/internal/format"
+	"go.thesmos.sh/ergon/internal/license"
 )
 
 // Config is the fully-resolved configuration for one ergon
@@ -42,6 +44,15 @@ type Config struct {
 	// Bootstrap configures `ergon bootstrap`. See
 	// [bootstrap.Config] for field semantics.
 	Bootstrap bootstrap.Config `mapstructure:"bootstrap"`
+
+	// License configures `ergon license` (apply) and
+	// `ergon lint license` (verify). See [license.Config] for
+	// field semantics.
+	License license.Config `mapstructure:"license"`
+
+	// Format configures `ergon fmt`. See [format.Config] for field
+	// semantics.
+	Format format.Config `mapstructure:"format"`
 }
 
 // Defaults returns the Config populated with each subsystem's own
@@ -51,5 +62,7 @@ type Config struct {
 func Defaults() Config {
 	return Config{
 		Bootstrap: bootstrap.Defaults(),
+		License:   license.Defaults(),
+		Format:    format.Defaults(),
 	}
 }

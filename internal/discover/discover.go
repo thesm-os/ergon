@@ -52,6 +52,34 @@ func Resolve(ctx context.Context, override []string) (string, []modules.Module, 
 	return root, mods, nil
 }
 
+// ImportPath returns the module import path declared in
+// <root>/go.mod — the value of the `module` directive. Used by gci
+// to group imports of the project's own packages under the
+// `prefix(<path>)` section.
+//
+// Errors wrap the underlying read failure when go.mod is missing
+// or unreadable, and report a usage-style error when the file
+// exists but contains no `module` directive (a malformed go.mod).
+func ImportPath(root string) (string, error) {
+	path := filepath.Join(root, "go.mod")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	for line := range strings.Lines(string(body)) {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "module ") && !strings.HasPrefix(line, "module\t") {
+			continue
+		}
+		mod := strings.TrimSpace(strings.TrimPrefix(line, "module"))
+		mod = strings.Trim(mod, "\"")
+		if mod != "" {
+			return mod, nil
+		}
+	}
+	return "", fmt.Errorf("no `module` directive in %s", path)
+}
+
 // Root returns the absolute path of the repository root by shelling
 // out to `git rev-parse --show-toplevel`. Errors wrap the
 // underlying command output so a non-git working directory produces

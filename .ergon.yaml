@@ -1,7 +1,50 @@
 # ergon's own configuration.
 #
-# All fields are optional; values not set here are auto-discovered
-# from go.mod, go.work, repo layout, and other config files. This
-# file overrides discovered defaults.
+# Every field is optional; values not set here fall back to the
+# subsystem's `Defaults()` function. This file shows every
+# currently-configurable section populated with its default value
+# so it doubles as a worked reference for new repositories.
 
+# Project identity — used in help banners and as the directory
+# name for cached artifacts (.ergon/, .eidos/, ...). Defaults to
+# the repository's basename.
 name: ergon
+
+# Module set ergon iterates for multi-module operations.
+# When empty, discovery reads `go.work` (or falls back to a single
+# root entry). When set, the listed paths are used verbatim and
+# `testdata` filtering does not apply — the user explicitly named
+# the modules.
+modules: []
+
+# bootstrap — `ergon bootstrap`
+bootstrap:
+  # Per-repo additions to the built-in tool list (gofumpt, gci,
+  # golangci-lint, govulncheck, go-license, benchstat). Each
+  # entry installs via `go install <pkg>@<version>`.
+  extra_tools: []
+
+# license — `ergon license` (apply) and `ergon lint license` (verify)
+license:
+  # Path to go-license's YAML config, relative to the repository root.
+  config_file: .go-license.yml
+  # Directory basenames pruned from the source walk (entire subtree
+  # below any match drops). Override to extend or replace.
+  exclude_dirs: [.git, vendor, dist, node_modules]
+  # Filename globs (matched via filepath.Match) skipped during the
+  # walk. Covers the generated-file conventions ergon recognises.
+  exclude_files:
+    - "*.gen.go"
+    - "*.gen_test.go"
+
+# format — `ergon fmt`
+format:
+  # Argument list handed to markdownlint-cli2. Glob patterns select
+  # files; entries prefixed with `#` exclude paths. Markdown lint
+  # is best-effort during fmt — a missing markdownlint-cli2 binary
+  # surfaces as a warning and the rest of the fmt run proceeds.
+  markdown_globs:
+    - "**/*.md"
+    - "#vendor"
+    - "#dist"
+    - "#node_modules"
