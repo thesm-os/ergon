@@ -20,11 +20,7 @@ var modInstallCmd = &cobra.Command{
 		"against go.sum).",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		root, err := discover.Root(cmd.Context())
-		if err != nil {
-			return err
-		}
-		mods, err := discover.Modules(root, cfg.Modules)
+		root, mods, err := discover.Resolve(cmd.Context(), cfg.Modules)
 		if err != nil {
 			return err
 		}

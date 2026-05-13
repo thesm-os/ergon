@@ -28,6 +28,30 @@ import (
 	"go.thesmos.sh/ergon/internal/modules"
 )
 
+// Resolve bundles [Root] and [Modules]: discovers the repository
+// root, then resolves the module set respecting override per the
+// rules in [Modules]. Every multi-module ergon subcommand starts
+// with a Resolve call so the discovery contract has exactly one
+// implementation.
+//
+// Testdata handling tracks the source: when override is empty,
+// `go.work` entries that contain a `testdata` segment are filtered
+// out (the Go test toolchain reserves testdata for fixtures, never
+// for release-eligible code). When override is non-empty, every
+// entry is used verbatim — the user explicitly listed those
+// directories, so testdata filtering is bypassed.
+func Resolve(ctx context.Context, override []string) (string, []modules.Module, error) {
+	root, err := Root(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	mods, err := Modules(root, override)
+	if err != nil {
+		return "", nil, err
+	}
+	return root, mods, nil
+}
+
 // Root returns the absolute path of the repository root by shelling
 // out to `git rev-parse --show-toplevel`. Errors wrap the
 // underlying command output so a non-git working directory produces

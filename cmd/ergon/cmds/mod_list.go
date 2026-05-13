@@ -24,11 +24,7 @@ var modListCmd = &cobra.Command{
 		"Root is printed as `.`.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		root, err := discover.Root(cmd.Context())
-		if err != nil {
-			return err
-		}
-		mods, err := discover.Modules(root, cfg.Modules)
+		_, mods, err := discover.Resolve(cmd.Context(), cfg.Modules)
 		if err != nil {
 			return err
 		}
