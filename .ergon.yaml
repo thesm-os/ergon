@@ -89,6 +89,15 @@ bench:
     bytes_percent: 10
     allocs_percent: 0
 
+# release — `ergon release`
+release:
+  # Subset of modules to release. When non-empty this list REPLACES
+  # the top-level `modules:` value for `ergon release` only —
+  # every other subcommand keeps operating on the global set
+  # (or `go.work` discovery when that is empty). When empty,
+  # release inherits the global module list.
+  modules: []
+
 # checks — `ergon check` and its subcommands.
 #
 # `excludes` and `skips` live at this level (not under coverage

@@ -122,6 +122,28 @@ func TestLoad(t *testing.T) {
 		}
 	})
 
+	t.Run("release.modules populates the release scope", func(t *testing.T) {
+		t.Parallel()
+		path := writeYAML(t, `release:
+  modules:
+    - .
+    - cli
+`)
+		got, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load err: %v", err)
+		}
+		want := []string{".", "cli"}
+		if len(got.Release.Modules) != len(want) {
+			t.Fatalf("Release.Modules = %+v, want %+v", got.Release.Modules, want)
+		}
+		for i, m := range want {
+			if got.Release.Modules[i] != m {
+				t.Errorf("Release.Modules[%d] = %q, want %q", i, got.Release.Modules[i], m)
+			}
+		}
+	})
+
 	t.Run("malformed yaml surfaces a read error", func(t *testing.T) {
 		t.Parallel()
 		path := writeYAML(t, "name: [unterminated\n")

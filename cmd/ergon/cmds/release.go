@@ -50,7 +50,15 @@ var releaseCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		root, mods, err := discover.Resolve(cmd.Context(), cfg.Modules)
+		// release.Modules, when set, replaces the global module
+		// list for `ergon release` only — other subcommands keep
+		// using cfg.Modules. Empty falls through to the global
+		// list, which itself falls back to `go.work` discovery.
+		modScope := cfg.Modules
+		if len(cfg.Release.Modules) > 0 {
+			modScope = cfg.Release.Modules
+		}
+		root, mods, err := discover.Resolve(cmd.Context(), modScope)
 		if err != nil {
 			return err
 		}

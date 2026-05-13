@@ -23,6 +23,7 @@ import (
 	"go.thesmos.sh/ergon/internal/checks/policy"
 	"go.thesmos.sh/ergon/internal/license"
 	"go.thesmos.sh/ergon/internal/markdown"
+	"go.thesmos.sh/ergon/internal/release"
 	"go.thesmos.sh/ergon/internal/test"
 )
 
@@ -69,6 +70,11 @@ type Config struct {
 	// Bench configures `ergon bench baseline` and `ergon bench
 	// regression`. See [bench.Config].
 	Bench bench.Config `mapstructure:"bench"`
+
+	// Release configures `ergon release`. See [release.Config];
+	// the only field today is a module scope that overrides
+	// [Config.Modules] for release only.
+	Release release.Config `mapstructure:"release"`
 
 	// Checks configures the `ergon check *` subcommands.
 	Checks ChecksConfig `mapstructure:"checks"`
@@ -124,6 +130,7 @@ func Defaults() Config {
 		Markdown:  markdown.Defaults(),
 		Test:      test.Defaults(),
 		Bench:     bench.Defaults(),
+		Release:   release.Defaults(),
 		Checks: ChecksConfig{
 			Coverage:    coverage.Defaults(),
 			Mutation:    mutation.Defaults(),
