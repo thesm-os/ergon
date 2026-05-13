@@ -400,7 +400,8 @@ const (
 // where <status> is LIVED, "NOT COVERED", or "TIMED OUT". Leading
 // whitespace is gremlins' right-alignment of the status column.
 var mutantLinePattern = regexp.MustCompile(
-	`^\s*(LIVED|NOT COVERED|TIMED OUT)\s+(\S+)\s+at\s+(\S+?):\d+:\d+\s*$`)
+	`^\s*(LIVED|NOT COVERED|TIMED OUT)\s+(\S+)\s+at\s+(\S+?):\d+:\d+\s*$`,
+)
 
 // parseMutantFiles walks gremlins' output, groups every non-killed
 // mutant by file, and returns the per-file totals sorted by
