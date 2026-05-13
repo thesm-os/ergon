@@ -50,7 +50,8 @@ func Fuzz(
 	}
 	for _, t := range targets {
 		fmt.Fprintf(stdout, "[%s] fuzz %s in %s\n", t.Module.Dir, t.Name, t.PkgRel)
-		err := runner.Run(ctx,
+		err := runner.Run(
+			ctx,
 			optsFor(in.Root, t.Module, stdout, stderr),
 			"go", "test",
 			"-run=^$",

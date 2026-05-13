@@ -30,7 +30,8 @@ var fmtCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return format.Run(cmd.Context(), xexec.Command{},
+		return format.Run(
+			cmd.Context(), xexec.Command{},
 			cmd.OutOrStdout(), cmd.ErrOrStderr(),
 			format.Inputs{Root: root, ImportPath: importPath, Modules: mods},
 			cfg.License, cfg.Markdown,

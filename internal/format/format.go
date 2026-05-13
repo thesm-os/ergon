@@ -67,7 +67,8 @@ func Run(
 			return fmt.Errorf("gofumpt: %w", err)
 		}
 		fmt.Fprintf(stdout, "[%s] gci\n", m.Dir)
-		if err := runner.Run(ctx, opts,
+		if err := runner.Run(
+			ctx, opts,
 			"gci", "write",
 			"--section", "standard",
 			"--section", "default",

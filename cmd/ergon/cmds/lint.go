@@ -26,7 +26,8 @@ var lintCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return lint.All(cmd.Context(), xexec.Command{},
+		return lint.All(
+			cmd.Context(), xexec.Command{},
 			cmd.OutOrStdout(), cmd.ErrOrStderr(),
 			lint.Inputs{Root: root, Modules: mods},
 			cfg.Markdown, cfg.License,
