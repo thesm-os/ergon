@@ -27,7 +27,7 @@ var testCoverageCmd = &cobra.Command{
 			return err
 		}
 		return test.Coverage(cmd.Context(), xexec.Command{},
-			cmd.OutOrStdout(), cmd.ErrOrStderr(), in)
+			cmd.OutOrStdout(), cmd.ErrOrStderr(), in, stageOpts())
 	},
 }
 

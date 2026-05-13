@@ -198,43 +198,73 @@ func TestBench(t *testing.T) {
 	})
 }
 
-// TestCoverage pins the `go tool cover -html` invocation shape and
-// the silent-skip behaviour for modules without a profile.
+// TestCoverage pins the per-module pipeline shape (`go tool cover
+// -func` + `go tool cover -html`), the silent-skip behaviour for
+// modules without a profile, and the rendered note that surfaces
+// the total percentage + HTML filename.
 func TestCoverage(t *testing.T) {
 	t.Parallel()
 
-	t.Run("converts existing profiles to html and skips missing ones", func(t *testing.T) {
+	t.Run("runs -func + -html per profile and renders the % note", func(t *testing.T) {
 		t.Parallel()
 		coverDir := t.TempDir()
 		// Only `cli` has a profile; root does not.
 		if err := os.WriteFile(filepath.Join(coverDir, "cli.out"), []byte("mode: atomic\n"), 0o600); err != nil {
 			t.Fatalf("write profile: %v", err)
 		}
-		runner := &fakeRunner{}
+		runner := &fakeRunner{stdout: "go.example.com/x/pkg/foo.go:1:\tBar\t100.0%\ntotal:\t\t(statements)\t84.5%\n"}
+
 		in := Inputs{
 			Root:        "/repo",
 			Modules:     []modules.Module{{Dir: "."}, {Dir: "cli"}},
 			CoverageDir: coverDir,
 		}
-
-		if err := Coverage(t.Context(), runner, io.Discard, io.Discard, in); err != nil {
+		var stdout strings.Builder
+		if err := Coverage(t.Context(), runner, &stdout, io.Discard, in, stage.Options{}); err != nil {
 			t.Fatalf("Coverage err: %v", err)
 		}
-		if len(runner.calls) != 1 {
-			t.Fatalf("calls = %+v, want one (cli only)", runner.calls)
+		// Two calls per profile (-func then -html); root has no
+		// profile and is skipped.
+		if len(runner.calls) != 2 {
+			t.Fatalf("calls = %d, want 2", len(runner.calls))
 		}
-		assertContainsAll(t, runner.calls[0].args, []string{
+		assertContainsAll(t, runner.calls[1].args, []string{
 			"tool", "cover",
 			"-html=" + filepath.Join(coverDir, "cli.out"),
 			"-o", filepath.Join(coverDir, "cli.html"),
 		})
+		if !strings.Contains(stdout.String(), "84.5%") {
+			t.Fatalf("stdout missing parsed percent: %q", stdout.String())
+		}
+		// The rendered note should carry both the .out and .html
+		// paths relative to the repo root, joined by an arrow.
+		if !strings.Contains(stdout.String(), "cli.out") || !strings.Contains(stdout.String(), "cli.html") {
+			t.Fatalf("stdout missing out/html pair: %q", stdout.String())
+		}
+		if !strings.Contains(stdout.String(), "→") {
+			t.Fatalf("stdout missing arrow separator: %q", stdout.String())
+		}
 	})
 
 	t.Run("missing coverage dir surfaces an error", func(t *testing.T) {
 		t.Parallel()
 		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}}}
-		if err := Coverage(t.Context(), &fakeRunner{}, io.Discard, io.Discard, in); err == nil {
+		if err := Coverage(t.Context(), &fakeRunner{}, io.Discard, io.Discard, in, stage.Options{}); err == nil {
 			t.Fatal("Coverage returned nil for empty CoverageDir")
+		}
+	})
+
+	t.Run("-func failure surfaces with the captured output", func(t *testing.T) {
+		t.Parallel()
+		coverDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(coverDir, "cli.out"), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write profile: %v", err)
+		}
+		runner := &fakeRunner{runErr: errors.New("malformed profile"), stdout: "boom\n"}
+		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "cli"}}, CoverageDir: coverDir}
+		err := Coverage(t.Context(), runner, io.Discard, io.Discard, in, stage.Options{})
+		if err == nil {
+			t.Fatal("Coverage returned nil, want subprocess error")
 		}
 	})
 }
@@ -414,10 +444,13 @@ func TestDiscoverFuzzTargets(t *testing.T) {
 
 // fakeRunner satisfies [xexec.Runner] for tests. The mutex
 // covers calls so the runner is safe under stage.PerModule's
-// default (parallel) fan-out.
+// default (parallel) fan-out. stdout, when set, is written to
+// opts.Stdout on every invocation; runErr is the simulated
+// subprocess exit.
 type fakeRunner struct {
 	mu     sync.Mutex
 	calls  []recordedCall
+	stdout string
 	runErr error
 }
 
@@ -433,6 +466,9 @@ func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, name string, arg
 	// per-dir assertions stay portable across operating systems.
 	f.calls = append(f.calls, recordedCall{dir: filepath.ToSlash(opts.Dir), name: name, args: slices.Clone(args)})
 	f.mu.Unlock()
+	if opts.Stdout != nil && f.stdout != "" {
+		_, _ = opts.Stdout.Write([]byte(f.stdout))
+	}
 	return f.runErr
 }
 

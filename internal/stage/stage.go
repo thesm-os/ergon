@@ -72,6 +72,14 @@ type StepResult struct {
 
 	// Err is the subprocess error, or nil on pass.
 	Err error
+
+	// Note is an optional success-path annotation. When the step
+	// passes, the rendered verdict line appends Note (e.g. a
+	// percentage, a path the work produced) so the user sees the
+	// salient result inline. Ignored when Err or Skipped is set —
+	// those branches build their own Note from the failure/skip
+	// reason.
+	Note string
 }
 
 // PerModule runs fn against every module and renders the section
@@ -339,6 +347,6 @@ func makeResult(label string, r StepResult) style.StageResult {
 			Output: r.Output,
 		}
 	default:
-		return style.StageResult{Label: label}
+		return style.StageResult{Label: label, Note: r.Note}
 	}
 }
