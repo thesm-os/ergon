@@ -34,7 +34,7 @@ var generateCmd = &cobra.Command{
 		return generate.Run(cmd.Context(), xexec.Command{},
 			cmd.OutOrStdout(), cmd.ErrOrStderr(),
 			format.Inputs{Root: root, ImportPath: importPath, Modules: mods},
-			cfg.License, cfg.Markdown)
+			cfg.License, cfg.Markdown, stageOpts())
 	},
 }
 

@@ -9,7 +9,6 @@ package generate
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"path/filepath"
 
@@ -18,30 +17,30 @@ import (
 	"go.thesmos.sh/ergon/internal/license"
 	"go.thesmos.sh/ergon/internal/markdown"
 	"go.thesmos.sh/ergon/internal/modules"
+	"go.thesmos.sh/ergon/internal/stage"
 )
 
 // Run regenerates every `//go:generate` directive in the workspace
 // and then calls [format.Run] so the new files are formatted and
 // the SPDX headers applied.
 //
-// The generated-code refresh runs per module; format runs once
-// across the workspace.
+// The generated-code refresh runs as a per-module section; format
+// then renders its own three sections (license, go fmt,
+// markdownlint) on top.
 func Run(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
 	in format.Inputs, licenseCfg license.Config, markdownCfg markdown.Config,
+	opts stage.Options,
 ) error {
-	err := modules.Iterate(ctx, in.Modules, func(ctx context.Context, m modules.Module) error {
-		opts := xexec.Options{
-			Dir:    filepath.Join(in.Root, m.Dir),
-			Stdout: stdout,
-			Stderr: stderr,
-		}
-		fmt.Fprintf(stdout, "[%s] go generate ./...\n", m.Dir)
-		return xexec.RunAllowNoPackages(ctx, runner, opts, stdout, m.Dir,
-			"go", "generate", "./...")
-	})
+	err := stage.PerModule(ctx, stdout, in.Modules, opts,
+		"go generate", "regenerate //go:generate directives",
+		func(ctx context.Context, m modules.Module) stage.StepResult {
+			return stage.RunAllowSkip(ctx, runner, opts,
+				filepath.Join(in.Root, m.Dir), m.Dir,
+				stdout, stderr, stdout, "go", "generate", "./...")
+		})
 	if err != nil {
 		return err
 	}
-	return format.Run(ctx, runner, stdout, stderr, in, licenseCfg, markdownCfg)
+	return format.Run(ctx, runner, stdout, stderr, in, licenseCfg, markdownCfg, opts)
 }

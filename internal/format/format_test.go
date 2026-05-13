@@ -10,22 +10,26 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/license"
 	"go.thesmos.sh/ergon/internal/markdown"
 	"go.thesmos.sh/ergon/internal/modules"
+	"go.thesmos.sh/ergon/internal/stage"
 )
 
 // TestRun pins the orchestration order and the per-step behaviour
 // of `ergon fmt`. The contract under test: license headers go on
-// first, then gofumpt + gci run per module in declared order,
-// then markdownlint runs once at the workspace level.
+// first, then gofumpt + gci run per module, then markdownlint
+// runs once at the workspace level. Per-module fan-out is
+// concurrent, so order assertions are framed around section
+// boundaries rather than recorded-call indices.
 func TestRun(t *testing.T) {
 	t.Parallel()
 
-	t.Run("orchestrates license, gofumpt, gci, markdownlint in order", func(t *testing.T) {
+	t.Run("license first, gofumpt+gci per module, markdownlint last", func(t *testing.T) {
 		t.Parallel()
 		root := buildTree(t, "main.go")
 		runner := &fakeRunner{}
@@ -35,13 +39,34 @@ func TestRun(t *testing.T) {
 			ImportPath: "go.example.com/proj",
 			Modules:    []modules.Module{{Dir: "."}, {Dir: "cli"}},
 		}
-		err := Run(t.Context(), runner, io.Discard, io.Discard, in, license.Defaults(), markdown.Defaults())
+		err := Run(t.Context(), runner, io.Discard, io.Discard, in,
+			license.Defaults(), markdown.Defaults(), stage.Options{})
 		if err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
-		want := []string{"go-license", "gofumpt", "gci", "gofumpt", "gci", "markdownlint-cli2"}
-		if !slices.Equal(commandNames(runner.calls), want) {
-			t.Fatalf("call sequence = %+v, want %+v", commandNames(runner.calls), want)
+
+		// license must be the first call and markdownlint the last
+		// — the gofumpt/gci block in between is concurrent so its
+		// internal order is not asserted.
+		names := commandNames(runner.calls)
+		if names[0] != "go-license" {
+			t.Fatalf("first call = %q, want go-license", names[0])
+		}
+		if names[len(names)-1] != "markdownlint-cli2" {
+			t.Fatalf("last call = %q, want markdownlint-cli2", names[len(names)-1])
+		}
+		// Two modules × (gofumpt + gci) = 4 fmt calls, plus
+		// go-license + markdownlint = 6 total.
+		if len(names) != 6 {
+			t.Fatalf("calls = %d (%+v), want 6", len(names), names)
+		}
+		// Each module produced one gofumpt and one gci call.
+		counts := map[string]int{}
+		for _, n := range names {
+			counts[n]++
+		}
+		if counts["gofumpt"] != 2 || counts["gci"] != 2 {
+			t.Fatalf("counts = %+v, want gofumpt=2 gci=2", counts)
 		}
 	})
 
@@ -55,7 +80,8 @@ func TestRun(t *testing.T) {
 			ImportPath: "go.example.com/proj",
 			Modules:    []modules.Module{{Dir: "."}},
 		}
-		err := Run(t.Context(), runner, io.Discard, io.Discard, in, license.Defaults(), markdown.Defaults())
+		err := Run(t.Context(), runner, io.Discard, io.Discard, in,
+			license.Defaults(), markdown.Defaults(), stage.Options{})
 		if err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
@@ -76,7 +102,8 @@ func TestRun(t *testing.T) {
 		}}
 
 		in := Inputs{Root: root, ImportPath: "p", Modules: []modules.Module{{Dir: "."}}}
-		err := Run(t.Context(), runner, io.Discard, io.Discard, in, license.Defaults(), markdown.Defaults())
+		err := Run(t.Context(), runner, io.Discard, io.Discard, in,
+			license.Defaults(), markdown.Defaults(), stage.Options{})
 		if err == nil {
 			t.Fatal("Run returned nil, want license error")
 		}
@@ -96,7 +123,8 @@ func TestRun(t *testing.T) {
 		}}
 
 		in := Inputs{Root: root, ImportPath: "p", Modules: []modules.Module{{Dir: "."}}}
-		err := Run(t.Context(), runner, io.Discard, io.Discard, in, license.Defaults(), markdown.Defaults())
+		err := Run(t.Context(), runner, io.Discard, io.Discard, in,
+			license.Defaults(), markdown.Defaults(), stage.Options{})
 		if err == nil {
 			t.Fatal("Run returned nil, want gofumpt error")
 		}
@@ -106,8 +134,10 @@ func TestRun(t *testing.T) {
 	})
 }
 
-// fakeRunner satisfies [xexec.Runner] for tests.
+// fakeRunner satisfies [xexec.Runner] for tests. The mutex makes
+// it safe under stage.PerModule's default (parallel) fan-out.
 type fakeRunner struct {
+	mu     sync.Mutex
 	calls  []recordedCall
 	decide func(name string, args []string) error
 }
@@ -118,7 +148,9 @@ type recordedCall struct {
 }
 
 func (f *fakeRunner) Run(_ context.Context, _ xexec.Options, name string, args ...string) error {
+	f.mu.Lock()
 	f.calls = append(f.calls, recordedCall{name: name, args: slices.Clone(args)})
+	f.mu.Unlock()
 	if f.decide != nil {
 		return f.decide(name, args)
 	}
