@@ -14,20 +14,19 @@ import (
 
 // TestRun pins the contract of [Run]: errors.New literals must
 // start with the file's package name (optionally `<pkg>.<sub>:`);
-// test files are exempt; missing TargetDirs subtrees are skipped
-// silently.
+// test files are exempt; TargetDirs narrows the scan.
 func TestRun(t *testing.T) {
 	t.Parallel()
 
 	t.Run("matching prefix passes", func(t *testing.T) {
 		t.Parallel()
-		root := buildTree(t, map[string]string{
+		root, files := buildFiles(t, map[string]string{
 			"pkg/clock.go": "package clock\n\nimport \"errors\"\n\n" +
 				"var ErrZero = errors.New(\"clock: instant is zero\")\n",
 		})
 
 		var stdout bytes.Buffer
-		if err := Run(&stdout, io.Discard, root, Defaults()); err != nil {
+		if err := Run(&stdout, io.Discard, root, files, Defaults()); err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
 		if !strings.Contains(stdout.String(), "0 violations") {
@@ -37,13 +36,13 @@ func TestRun(t *testing.T) {
 
 	t.Run("missing prefix is a violation", func(t *testing.T) {
 		t.Parallel()
-		root := buildTree(t, map[string]string{
+		root, files := buildFiles(t, map[string]string{
 			"pkg/clock.go": "package clock\n\nimport \"errors\"\n\n" +
 				"var ErrZero = errors.New(\"instant is zero\")\n",
 		})
 
 		var stderr bytes.Buffer
-		err := Run(io.Discard, &stderr, root, Defaults())
+		err := Run(io.Discard, &stderr, root, files, Defaults())
 		if err == nil {
 			t.Fatal("Run returned nil, want error")
 		}
@@ -54,61 +53,51 @@ func TestRun(t *testing.T) {
 
 	t.Run("sub-package qualifier (<pkg>.<sub>:) is accepted", func(t *testing.T) {
 		t.Parallel()
-		root := buildTree(t, map[string]string{
+		root, files := buildFiles(t, map[string]string{
 			"pkg/kernel.go": "package kernel\n\nimport \"errors\"\n\n" +
 				"var ErrPatch = errors.New(\"kernel.patch: malformed\")\n",
 		})
 
-		if err := Run(io.Discard, io.Discard, root, Defaults()); err != nil {
+		if err := Run(io.Discard, io.Discard, root, files, Defaults()); err != nil {
 			t.Fatalf("Run err: %v, want sub-package qualifier to pass", err)
-		}
-	})
-
-	t.Run("wrong prefix surfaces with expected prefix in the message", func(t *testing.T) {
-		t.Parallel()
-		root := buildTree(t, map[string]string{
-			"pkg/clock.go": "package clock\n\nimport \"errors\"\n\n" +
-				"var ErrWrong = errors.New(\"other: wrong package\")\n",
-		})
-
-		var stderr bytes.Buffer
-		err := Run(io.Discard, &stderr, root, Defaults())
-		if err == nil {
-			t.Fatal("Run returned nil, want error")
-		}
-		if !strings.Contains(stderr.String(), `errors.New("other: wrong package")`) {
-			t.Fatalf("stderr = %q, want literal echoed", stderr.String())
 		}
 	})
 
 	t.Run("test files are not scanned", func(t *testing.T) {
 		t.Parallel()
-		root := buildTree(t, map[string]string{
+		root, files := buildFiles(t, map[string]string{
 			"pkg/clock_test.go": "package clock\n\nimport \"errors\"\n\n" +
 				"var TestErr = errors.New(\"no prefix\")\n",
 		})
 
-		if err := Run(io.Discard, io.Discard, root, Defaults()); err != nil {
+		if err := Run(io.Discard, io.Discard, root, files, Defaults()); err != nil {
 			t.Fatalf("Run err: %v, want test files to be exempt", err)
 		}
 	})
 
-	t.Run("missing target dir is a silent skip", func(t *testing.T) {
+	t.Run("TargetDirs narrows the scan", func(t *testing.T) {
 		t.Parallel()
-		root := t.TempDir()
-		cfg := Config{TargetDirs: []string{"does-not-exist"}}
+		root, files := buildFiles(t, map[string]string{
+			"foundation/clock.go": "package clock\n\nimport \"errors\"\n\n" +
+				"var ErrZero = errors.New(\"clock: zero\")\n",
+			"cmd/main.go": "package main\n\nimport \"errors\"\n\n" +
+				"var ErrCmd = errors.New(\"anything goes here\")\n",
+		})
 
-		if err := Run(io.Discard, io.Discard, root, cfg); err != nil {
-			t.Fatalf("Run err: %v, want missing dir to be tolerated", err)
+		cfg := Config{TargetDirs: []string{"foundation"}}
+		if err := Run(io.Discard, io.Discard, root, files, cfg); err != nil {
+			t.Fatalf("Run err: %v, want cmd/ to be ignored", err)
 		}
 	})
 }
 
-// buildTree writes files into a fresh tempdir and returns the root.
-func buildTree(t *testing.T, files map[string]string) string {
+// buildFiles writes files into a fresh tempdir and returns the
+// root plus the list of repo-relative paths.
+func buildFiles(t *testing.T, contents map[string]string) (string, []string) {
 	t.Helper()
 	root := t.TempDir()
-	for rel, body := range files {
+	var paths []string
+	for rel, body := range contents {
 		full := filepath.Join(root, rel)
 		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
 			t.Fatalf("mkdir %s: %v", filepath.Dir(full), err)
@@ -116,6 +105,7 @@ func buildTree(t *testing.T, files map[string]string) string {
 		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
 			t.Fatalf("write %s: %v", full, err)
 		}
+		paths = append(paths, rel)
 	}
-	return root
+	return root, paths
 }

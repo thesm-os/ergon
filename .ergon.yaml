@@ -64,3 +64,70 @@ test:
   bench_count: 6
   # Per-target wall-clock budget for `ergon test fuzz`.
   fuzz_time: 30s
+
+# checks — `ergon check` and its subcommands
+checks:
+  # coverage — `ergon check coverage`
+  #
+  # Per-package thresholds rather than one global number — different
+  # layers have different testability ceilings. `branch` and
+  # `require_branch` are reserved for the future gobco-backed gate;
+  # `go test -cover` only reports statement coverage today.
+  coverage:
+    packages:
+      - path: internal/checks/...
+        line: 80
+        branch: 80
+        require_branch: false
+      - path: internal/release/...
+        line: 80
+        branch: 80
+        require_branch: false
+      - path: internal/...
+        line: 70
+        branch: 70
+        require_branch: false
+      - path: cmd/ergon/...
+        line: 50
+        branch: 50
+        require_branch: false
+    excludes:
+      - path: "**/*_test.go"
+        reason: tests are not part of the coverage gate
+      - path: internal/version/...
+        reason: ldflags-injected build metadata; no logic
+
+  # mutation — `ergon check mutation` (runner not yet wired)
+  #
+  # Two metrics gate independently per layer:
+  #   score    test efficacy = KILLED / (KILLED + LIVED). Of the
+  #            mutants the test suite reached, how many were caught.
+  #   coverage mutator coverage = (KILLED + LIVED) / TOTAL_VIABLE.
+  #            Of every viable mutant, how many the test suite
+  #            reached at all. Catches "tests don't reach the
+  #            mutateable code".
+  mutation:
+    packages: []
+
+  # error-prefix — `ergon check error-prefix`
+  error_prefix:
+    # Directories (repository-relative) the walker recurses into.
+    # `[.]` covers the entire tree.
+    target_dirs: ["."]
+
+  # commit-msg — `ergon check commit-msg <file>`
+  commit_msg:
+    # Closed set of accepted Conventional Commit types.
+    types:
+      - feat
+      - fix
+      - docs
+      - refactor
+      - test
+      - ci
+      - chore
+      - perf
+      - build
+      - revert
+    # Maximum length (in bytes) of the commit subject line.
+    max_subject_length: 72

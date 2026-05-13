@@ -6,11 +6,9 @@ package errorprefix
 import (
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 )
 
@@ -23,52 +21,34 @@ var packagePattern = regexp.MustCompile(`^package\s+(\w+)`)
 // sentinel messages.
 var errorsNewPattern = regexp.MustCompile(`errors\.New\("([^"]+)"\)`)
 
-// prunedDirs lists directory basenames the walker skips.
-var prunedDirs = []string{".git", "vendor", "dist", "node_modules"}
-
-// Run walks every directory in cfg.TargetDirs and reports every
-// non-test `errors.New(...)` whose literal does not start with the
-// file's package name (optionally followed by `.<sub>` for nested
-// scopes) and a colon. Test files (`*_test.go`) are excluded —
-// test errors are not sentinels.
-func Run(stdout, stderr io.Writer, root string, cfg Config) error {
+// Run scans every non-test `.go` file in files for `errors.New`
+// literals and reports those whose prefix does not match the
+// file's package name (optionally `<pkg>.<sub>:` for nested
+// scopes). files is a slice of repo-relative paths; root is the
+// absolute repository root used to resolve each file on disk.
+//
+// cfg.TargetDirs narrows the scan to repo-relative prefix(es) —
+// useful when the rule applies only to the library layers, not
+// to cmd/.
+func Run(stdout, stderr io.Writer, root string, files []string, cfg Config) error {
 	cfg = withDefaults(cfg)
 	var violations []finding
 	var scanned int
 
-	for _, dir := range cfg.TargetDirs {
-		base := filepath.Join(root, dir)
-		if _, err := os.Stat(base); err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return fmt.Errorf("stat %s: %w", base, err)
+	for _, rel := range files {
+		if !strings.HasSuffix(rel, ".go") || strings.HasSuffix(rel, "_test.go") {
+			continue
 		}
-		err := filepath.WalkDir(base, func(path string, d fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if d.IsDir() {
-				if slices.Contains(prunedDirs, d.Name()) {
-					return fs.SkipDir
-				}
-				return nil
-			}
-			if !strings.HasSuffix(d.Name(), ".go") || strings.HasSuffix(d.Name(), "_test.go") {
-				return nil
-			}
-			body, err := os.ReadFile(path)
-			if err != nil {
-				return fmt.Errorf("read %s: %w", path, err)
-			}
-			f, count := scanFile(path, string(body))
-			scanned += count
-			violations = append(violations, f...)
-			return nil
-		})
+		if !underTargets(rel, cfg.TargetDirs) {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
-			return err
+			return fmt.Errorf("read %s: %w", rel, err)
 		}
+		f, count := scanFile(rel, string(body))
+		scanned += count
+		violations = append(violations, f...)
 	}
 
 	if len(violations) > 0 {
@@ -93,6 +73,21 @@ func withDefaults(cfg Config) Config {
 		cfg.TargetDirs = d.TargetDirs
 	}
 	return cfg
+}
+
+// underTargets reports whether rel sits under any directory in
+// targets. A target of `.` matches every path.
+func underTargets(rel string, targets []string) bool {
+	for _, t := range targets {
+		if t == "." || t == "" {
+			return true
+		}
+		t = strings.TrimSuffix(t, "/")
+		if rel == t || strings.HasPrefix(rel, t+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // finding records one prefix violation for reporting.

@@ -50,10 +50,14 @@ var checkCmd = &cobra.Command{
 		if err = test.Run(ctx, runner, stdout, stderr, in, cfg.Test); err != nil {
 			return err
 		}
-		if err = skipexpiry.Run(stdout, stderr, root); err != nil {
+		goFiles, err := discover.GitFiles(ctx, runner, root, ".go")
+		if err != nil {
 			return err
 		}
-		if err = errorprefix.Run(stdout, stderr, root, cfg.Checks.ErrorPrefix); err != nil {
+		if err = skipexpiry.Run(stdout, stderr, root, goFiles); err != nil {
+			return err
+		}
+		if err = errorprefix.Run(stdout, stderr, root, goFiles, cfg.Checks.ErrorPrefix); err != nil {
 			return err
 		}
 		return vuln.Run(ctx, runner, stdout, stderr, root, mods)

@@ -16,7 +16,9 @@ package config
 import (
 	"go.thesmos.sh/ergon/internal/bootstrap"
 	"go.thesmos.sh/ergon/internal/checks/commitmsg"
+	"go.thesmos.sh/ergon/internal/checks/coverage"
 	"go.thesmos.sh/ergon/internal/checks/errorprefix"
+	"go.thesmos.sh/ergon/internal/checks/mutation"
 	"go.thesmos.sh/ergon/internal/license"
 	"go.thesmos.sh/ergon/internal/markdown"
 	"go.thesmos.sh/ergon/internal/test"
@@ -70,6 +72,14 @@ type Config struct {
 // settings live under a single top-level YAML key (`checks:`) the
 // way the design's example shows.
 type ChecksConfig struct {
+	// Coverage configures `ergon check coverage`. See
+	// [coverage.Config].
+	Coverage coverage.Config `mapstructure:"coverage"`
+
+	// Mutation configures `ergon check mutation`. See
+	// [mutation.Config].
+	Mutation mutation.Config `mapstructure:"mutation"`
+
 	// ErrorPrefix configures `ergon check error-prefix`. See
 	// [errorprefix.Config].
 	ErrorPrefix errorprefix.Config `mapstructure:"error_prefix"`
@@ -90,6 +100,8 @@ func Defaults() Config {
 		Markdown:  markdown.Defaults(),
 		Test:      test.Defaults(),
 		Checks: ChecksConfig{
+			Coverage:    coverage.Defaults(),
+			Mutation:    mutation.Defaults(),
 			ErrorPrefix: errorprefix.Defaults(),
 			CommitMsg:   commitmsg.Defaults(),
 		},
