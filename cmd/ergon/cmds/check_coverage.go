@@ -13,19 +13,32 @@ import (
 	xexec "go.thesmos.sh/ergon/internal/exec"
 )
 
+// coverageVerbose toggles the "Uncovered ranges" dump in the
+// per-target report. Bound to `-v` / `--verbose` on
+// [checkCoverageCmd].
+var coverageVerbose bool
+
 // checkCoverageCmd is `ergon check coverage`. Reads the
 // layered-threshold schema, merges per-module `.out` profiles
 // under the coverage directory, and fails any function below its
 // layer's minimum coverage.
+//
+// Positional arguments restrict the run to a subset of the
+// configured layers — each arg is matched as a layer prefix
+// (e.g. `core/kernel/fold`). With no args every layer in
+// `checks.coverage.packages` runs.
 var checkCoverageCmd = &cobra.Command{
-	Use:   "coverage",
+	Use:   "coverage [target...]",
 	Short: "Enforce per-layer coverage thresholds",
 	Long: "Reads the per-layer thresholds from `.ergon.yaml`'s " +
 		"`checks.coverage` section, merges the per-module `.out` " +
 		"profiles produced by `ergon test`, runs `go tool cover -func`, " +
-		"and fails any function below its layer's minimum coverage.",
-	Args: cobra.NoArgs,
-	RunE: func(cmd *cobra.Command, _ []string) error {
+		"and fails any function below its layer's minimum coverage.\n\n" +
+		"Positional arguments restrict the run to specific layer prefixes; " +
+		"with none, every configured layer is exercised. The -v flag " +
+		"appends the uncovered block ranges for every failing target.",
+	Args: cobra.ArbitraryArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 		root, err := discover.Root(ctx)
 		if err != nil {
@@ -42,10 +55,13 @@ var checkCoverageCmd = &cobra.Command{
 		coverageDir := filepath.Join(root, "."+name, "coverage")
 		return coverage.Run(ctx, xexec.Command{},
 			cmd.OutOrStdout(), cmd.ErrOrStderr(),
-			root, coverageDir, importPath+"/", cfg.Checks.Coverage)
+			root, coverageDir, importPath+"/", cfg.Checks.Coverage,
+			coverage.RunOptions{Targets: args, Verbose: coverageVerbose})
 	},
 }
 
 func init() {
+	checkCoverageCmd.Flags().BoolVarP(&coverageVerbose, "verbose", "v", false,
+		"dump uncovered block ranges (file:start-end (stmts)) for every failing target")
 	checkCmd.AddCommand(checkCoverageCmd)
 }

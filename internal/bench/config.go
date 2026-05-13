@@ -25,22 +25,40 @@ type Config struct {
 	Thresholds Thresholds `mapstructure:"thresholds"`
 }
 
-// Thresholds expresses the maximum acceptable per-metric percent
-// change a fresh benchmark sample may show against the baseline.
-// Anything above is reported as a regression and fails the
-// command.
+// Thresholds expresses the per-metric regression policy. Each
+// metric is gated differently; the percentages name the boundary
+// each policy applies.
 //
-// Defaults are calibrated for routine CI use: a 5% time
-// regression is the conventional alarm threshold; allocation
-// counts and byte counts are also gated at 5%.
+// Defaults follow the conventional benchmark-regression policy:
+//
+//   - TimePercent = 5 — `sec/op` regressions of 5% or more are
+//     hard failures when benchstat reports the change as
+//     statistically significant.
+//
+//   - AllocsPercent = 0 — `allocs/op` is a contractual ceiling.
+//     Any statistically-significant positive change is a hard
+//     failure; the threshold is the minimum delta above which the
+//     gate triggers (0 means "any positive").
+//
+//   - BytesPercent = 10 — `B/op` is advisory. Changes of 10% or
+//     more surface as warnings, never as failures. Memory usage
+//     shifts under unrelated struct-padding changes too readily
+//     for a hard gate.
 type Thresholds struct {
-	// TimePercent gates the `sec/op` metric.
+	// TimePercent is the hard-fail threshold for the `sec/op`
+	// metric. Significant deltas at or above this percent fail
+	// the run.
 	TimePercent float64 `mapstructure:"time_percent"`
 
-	// BytesPercent gates the `B/op` metric.
+	// BytesPercent is the advisory threshold for the `B/op` metric.
+	// Deltas at or above this percent surface as warnings; the
+	// metric is never hard-gated.
 	BytesPercent float64 `mapstructure:"bytes_percent"`
 
-	// AllocsPercent gates the `allocs/op` metric.
+	// AllocsPercent is the hard-fail threshold for the `allocs/op`
+	// metric. Significant deltas strictly above this percent fail
+	// the run. Defaults to zero — any statistically-significant
+	// allocation increase is a regression.
 	AllocsPercent float64 `mapstructure:"allocs_percent"`
 }
 
@@ -51,8 +69,8 @@ func Defaults() Config {
 		BaselinePath: "bench/baseline.txt",
 		Thresholds: Thresholds{
 			TimePercent:   5,
-			BytesPercent:  5,
-			AllocsPercent: 5,
+			BytesPercent:  10,
+			AllocsPercent: 0,
 		},
 	}
 }

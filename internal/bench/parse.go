@@ -12,9 +12,11 @@ import (
 
 // Result records one (benchmark, metric) pair from the output of
 // `benchstat -format csv`. DeltaPercent is computed as
-// `(new - old) / old * 100`; benchstat's own "vs base" column is
-// statistically gated and shows "~" for inconclusive comparisons,
-// so the percent change is recomputed from the raw values.
+// `(new - old) / old * 100` so the percentage is independent of
+// benchstat's text formatting. Significant carries benchstat's own
+// statistical verdict from the "vs base" column: false when
+// benchstat printed `~` (the change is within noise), true when it
+// printed a signed percentage.
 type Result struct {
 	// Bench is the benchmark name as benchstat reports it,
 	// including the `-N` GOMAXPROCS suffix (e.g.
@@ -36,6 +38,46 @@ type Result struct {
 	// positive means a regression (slower / more bytes / more
 	// allocs).
 	DeltaPercent float64
+
+	// Significant is true when benchstat reported a signed
+	// percentage for this comparison rather than the literal `~`.
+	// False means the change is within the statistical noise floor
+	// for the sample size; time- and alloc-gates short-circuit on
+	// false to avoid flapping CI on inconclusive deltas.
+	Significant bool
+}
+
+// Verdict labels one [Outcome] with how its delta compares to the
+// configured threshold. Pass means the change is within budget;
+// Warn means the change exceeds an advisory ceiling but does not
+// fail the run; Fail means the change exceeds a hard ceiling.
+type Verdict int
+
+const (
+	// VerdictPass means the change is within the configured
+	// threshold (or statistically insignificant). The line still
+	// prints in the per-target summary but is not surfaced as a
+	// regression.
+	VerdictPass Verdict = iota
+	// VerdictWarn means the change exceeds an advisory threshold.
+	// Reported but does not fail the command — used today for
+	// [MetricBytes], whose noise floor under struct-padding
+	// changes makes a hard gate impractical.
+	VerdictWarn
+	// VerdictFail means the change exceeds the configured threshold
+	// for a metric ergon hard-gates on (today [MetricTime] and
+	// [MetricAllocs]). Surfaces as a regression and fails the run.
+	VerdictFail
+)
+
+// Outcome pairs a [Result] with its [Verdict] under a given
+// [Thresholds] configuration. Returned by [classify] so the
+// reporting layer can render the same set of records as both
+// failures and warnings.
+type Outcome struct {
+	Result    Result
+	Verdict   Verdict
+	Threshold float64
 }
 
 // Canonical metric names benchstat emits. Used as both the header
@@ -119,12 +161,20 @@ func parseBenchstatCSV(out string) ([]Result, error) {
 		if oldVal != 0 {
 			delta = (newVal - oldVal) / oldVal * 100
 		}
+		significant := true
+		if len(fields) >= 6 {
+			vsBase := strings.TrimSpace(fields[5])
+			if vsBase == "" || vsBase == "~" {
+				significant = false
+			}
+		}
 		results = append(results, Result{
 			Bench:        fields[0],
 			Metric:       currentMetric,
 			Old:          oldVal,
 			New:          newVal,
 			DeltaPercent: delta,
+			Significant:  significant,
 		})
 	}
 	if len(results) == 0 && currentMetric == "" {
@@ -133,35 +183,71 @@ func parseBenchstatCSV(out string) ([]Result, error) {
 	return results, nil
 }
 
-// regressions returns the subset of results whose DeltaPercent
-// exceeds the configured threshold for their metric. Negative
-// deltas (improvements) and metrics with no threshold configured
-// never appear.
-func regressions(results []Result, thresholds Thresholds) []Result {
-	var out []Result
+// classify applies the per-metric policy to every result and
+// returns one [Outcome] per result. Policies:
+//
+//   - [MetricTime]: fail when [Result.Significant] is true AND
+//     DeltaPercent exceeds [Thresholds.TimePercent]. Insignificant
+//     changes never fail.
+//
+//   - [MetricAllocs]: fail when [Result.Significant] is true AND
+//     DeltaPercent strictly exceeds [Thresholds.AllocsPercent]
+//     (default zero — any statistically-significant positive change
+//     is a regression). Allocation counts are contractual ceilings.
+//
+//   - [MetricBytes]: warn (never fail) when DeltaPercent meets or
+//     exceeds [Thresholds.BytesPercent]. Memory usage shifts under
+//     unrelated struct-padding changes too readily for a hard gate;
+//     ergon surfaces an advisory line instead.
+//
+// Improvements (negative deltas), zero-delta runs, and unknown
+// metrics fall through with [VerdictPass].
+func classify(results []Result, t Thresholds) []Outcome {
+	out := make([]Outcome, 0, len(results))
 	for _, r := range results {
-		threshold := metricThreshold(r.Metric, thresholds)
-		if threshold < 0 {
-			continue
+		oc := Outcome{Result: r, Verdict: VerdictPass}
+		switch r.Metric {
+		case MetricTime:
+			oc.Threshold = t.TimePercent
+			if r.Significant && r.DeltaPercent >= t.TimePercent {
+				oc.Verdict = VerdictFail
+			}
+		case MetricAllocs:
+			oc.Threshold = t.AllocsPercent
+			if r.Significant && r.DeltaPercent > t.AllocsPercent {
+				oc.Verdict = VerdictFail
+			}
+		case MetricBytes:
+			oc.Threshold = t.BytesPercent
+			if r.DeltaPercent >= t.BytesPercent {
+				oc.Verdict = VerdictWarn
+			}
 		}
-		if r.DeltaPercent > threshold {
-			out = append(out, r)
+		out = append(out, oc)
+	}
+	return out
+}
+
+// failures returns the subset of outcomes whose Verdict is
+// [VerdictFail]. Convenience wrapper for the reporting layer.
+func failures(outcomes []Outcome) []Outcome {
+	var out []Outcome
+	for _, o := range outcomes {
+		if o.Verdict == VerdictFail {
+			out = append(out, o)
 		}
 	}
 	return out
 }
 
-// metricThreshold returns the configured threshold for metric, or
-// -1 when ergon does not enforce a gate on that metric today.
-func metricThreshold(metric string, t Thresholds) float64 {
-	switch metric {
-	case MetricTime:
-		return t.TimePercent
-	case MetricBytes:
-		return t.BytesPercent
-	case MetricAllocs:
-		return t.AllocsPercent
-	default:
-		return -1
+// warnings returns the subset of outcomes whose Verdict is
+// [VerdictWarn]. Convenience wrapper for the reporting layer.
+func warnings(outcomes []Outcome) []Outcome {
+	var out []Outcome
+	for _, o := range outcomes {
+		if o.Verdict == VerdictWarn {
+			out = append(out, o)
+		}
 	}
+	return out
 }

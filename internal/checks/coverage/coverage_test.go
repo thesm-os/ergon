@@ -9,9 +9,9 @@ import (
 	"testing"
 )
 
-// TestGlobToRegex pins the glob-to-regex translation: `...` is the
-// recursive wildcard, `*` is the single-segment wildcard, literal
-// `.` characters are escaped.
+// TestGlobToRegex pins the glob-to-regex translation: `...` is
+// the recursive wildcard, `*` is the single-segment wildcard,
+// literal `.` characters are escaped.
 func TestGlobToRegex(t *testing.T) {
 	t.Parallel()
 
@@ -56,7 +56,7 @@ func TestGlobToRegex(t *testing.T) {
 
 // TestCompileLayers pins the longest-prefix-wins ordering of the
 // compiled layers: more specific globs come before more general
-// ones so [classify] finds the right threshold.
+// ones.
 func TestCompileLayers(t *testing.T) {
 	t.Parallel()
 
@@ -72,45 +72,6 @@ func TestCompileLayers(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("order = %+v, want %+v (longest path first)", got, want)
-	}
-}
-
-// TestClassify pins the contract of [classify]: passing functions
-// increment Passing, below-threshold non-excluded functions land
-// in Failures sorted by ascending coverage, excluded functions
-// land in Excluded, unscoped functions land in Unscoped.
-func TestClassify(t *testing.T) {
-	t.Parallel()
-
-	rows := []funcRow{
-		{Path: "go.example.com/x/internal/checks/coverage/coverage.go", Func: "Run", Pct: 85.0},
-		{Path: "go.example.com/x/internal/checks/coverage/coverage.go", Func: "weak", Pct: 40.0},
-		{Path: "go.example.com/x/internal/version/version.go", Func: "Ignored", Pct: 0.0},
-		{Path: "go.example.com/x/cmd/ergon/main.go", Func: "main", Pct: 55.0},
-		{Path: "go.example.com/x/outside/scope.go", Func: "Stray", Pct: 0.0},
-	}
-	layers := compileLayers([]Layer{
-		{Path: "internal/...", Line: 70},
-		{Path: "internal/checks/...", Line: 80},
-		{Path: "cmd/...", Line: 50},
-	})
-	excludes := compileExcludes([]Exclude{{Path: "internal/version/..."}})
-
-	r := classify(rows, layers, excludes, "go.example.com/x/")
-	if r.Passing != 2 {
-		t.Errorf("Passing = %d, want 2 (Run + main)", r.Passing)
-	}
-	if r.Excluded != 1 {
-		t.Errorf("Excluded = %d, want 1 (Ignored)", r.Excluded)
-	}
-	if r.Unscoped != 1 {
-		t.Errorf("Unscoped = %d, want 1 (Stray)", r.Unscoped)
-	}
-	if len(r.Failures) != 1 || r.Failures[0].Func != "weak" {
-		t.Fatalf("Failures = %+v, want [weak]", r.Failures)
-	}
-	if r.Failures[0].Layer != "internal/checks/..." {
-		t.Errorf("Layer = %q, want internal/checks/... (longest prefix)", r.Failures[0].Layer)
 	}
 }
 
@@ -133,5 +94,59 @@ func TestParseFuncLog(t *testing.T) {
 	}
 	if rows[0].Func != "Bar" || rows[0].Pct != 75.0 {
 		t.Errorf("row[0] = %+v, want Bar 75.0", rows[0])
+	}
+}
+
+// TestGlobMatch pins the shell-style glob the structural-skip
+// matcher uses (`*` matches any run of characters, others
+// literal).
+func TestGlobMatch(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		pattern, input string
+		want           bool
+	}{
+		{"*", "anything", true},
+		{"Run*Suite", "RunBasicSuite", true},
+		{"Run*Suite", "BasicSuite", false},
+		{"*test/model.go*", "pkg/test/model.go", true},
+		{"*test/model.go*", "pkg/test/other.go", false},
+		{"_", "_", true},
+		{"_", "named", false},
+	}
+	for _, tc := range cases {
+		got := globMatch(tc.pattern, tc.input)
+		if got != tc.want {
+			t.Errorf("globMatch(%q, %q) = %v, want %v", tc.pattern, tc.input, got, tc.want)
+		}
+	}
+}
+
+// TestMatchesSkip pins the structural-skip rule: BOTH FuncGlob
+// and FileGlob must match for a function to be skipped.
+func TestMatchesSkip(t *testing.T) {
+	t.Parallel()
+
+	skips := []Skip{
+		{Label: "suite", FuncGlob: "Run*Suite", FileGlob: "*test/*"},
+		{Label: "model", FuncGlob: "*", FileGlob: "*test/model.go*"},
+	}
+
+	cases := []struct {
+		fn, path string
+		want     bool
+	}{
+		{"RunFooSuite", "pkg/test/suite.go", true}, // suite
+		{"RunFooSuite", "pkg/main.go", false},      // file glob misses
+		{"Validate", "pkg/test/model.go", true},    // model
+		{"Validate", "pkg/main.go", false},         // neither
+		{"BuildSuite", "pkg/test/internal/builder.go", false},
+	}
+	for _, tc := range cases {
+		got := matchesSkip(tc.fn, tc.path, skips)
+		if got != tc.want {
+			t.Errorf("matchesSkip(%q, %q) = %v, want %v", tc.fn, tc.path, got, tc.want)
+		}
 	}
 }

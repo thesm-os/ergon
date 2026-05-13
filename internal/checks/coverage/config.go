@@ -9,10 +9,9 @@
 // function below its layer's `line` threshold.
 package coverage
 
-// Config declares the per-layer thresholds and the exclude list.
-// An empty config disables the check — `ergon check coverage`
-// short-circuits with a notice rather than treating zero layers
-// as a hard fail.
+// Config declares the per-layer thresholds, exclude list, and
+// structural skip rules. An empty config disables the check —
+// `ergon check coverage` short-circuits with a notice.
 type Config struct {
 	// Packages declares the per-layer thresholds. Each entry's
 	// [Layer.Path] is a glob (`...` recursive, `*` single segment)
@@ -22,8 +21,20 @@ type Config struct {
 
 	// Excludes drops functions whose path matches any entry from
 	// the threshold check. Excluded functions are counted in the
-	// report but never fail the build.
+	// report under "excluded" but never fail the build.
 	Excludes []Exclude `mapstructure:"excludes"`
+
+	// Skips lists structural skip rules orthogonal to layer
+	// thresholds: a function whose name matches FuncGlob AND whose
+	// file matches FileGlob is counted under "skipped" but never
+	// fails. Used for assertion branches the verifier framework
+	// only exercises against broken implementations.
+	Skips []Skip `mapstructure:"skips"`
+
+	// TopN caps the per-target failing-function list so the
+	// report stays scannable. A surplus is summarised as
+	// "+N more functions". Defaults to 10.
+	TopN int `mapstructure:"top_n"`
 }
 
 // Layer pairs a path glob with the minimum statement-coverage
@@ -58,9 +69,24 @@ type Exclude struct {
 	Reason string `mapstructure:"reason"`
 }
 
+// Skip declares a structural skip rule. A function matching BOTH
+// FuncGlob and FileGlob is reported as skipped (under Label) but
+// never fails the threshold check.
+//
+// Globs use shell-glob syntax: `*` matches any sequence except a
+// path separator; literal characters match themselves. The label
+// is human-facing and appears in the per-target summary.
+type Skip struct {
+	Label    string `mapstructure:"label"`
+	FuncGlob string `mapstructure:"func_glob"`
+	FileGlob string `mapstructure:"file_glob"`
+}
+
 // Defaults returns an empty Config. Coverage thresholds are an
 // explicit project policy — there is no useful baseline ergon can
 // supply that wouldn't be wrong for most repositories.
 func Defaults() Config {
-	return Config{}
+	return Config{
+		TopN: 10,
+	}
 }

@@ -18,24 +18,38 @@ import (
 	"strings"
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
+	"go.thesmos.sh/ergon/internal/style"
 )
 
+// RunOptions carries the per-invocation overrides the cobra layer
+// passes through to [Run]. Targets restricts which layers run;
+// Verbose dumps the count=0 block ranges of failing files.
+type RunOptions struct {
+	// Targets is the list of layer prefixes the user wants to
+	// exercise (e.g. `foundation`, `core/kernel/fold`). Empty
+	// means "every layer in cfg.Packages".
+	Targets []string
+
+	// Verbose, when true, appends an "Uncovered ranges" section
+	// after every failing target showing the file:start-end
+	// blocks the test suite did not exercise.
+	Verbose bool
+}
+
 // Run is `ergon check coverage`: merges every per-module `.out`
-// profile under coverageDir, invokes `go tool cover -func`, and
-// fails any function whose coverage falls below its layer's
-// threshold.
+// profile under coverageDir, invokes `go tool cover -func`, then
+// emits a per-target report and fails any function whose coverage
+// falls below its layer's threshold.
 //
-// modulePrefix is the import-path prefix the caller strips from
-// `go tool cover` output to derive repo-relative paths that match
-// the schema's globs (typically `<importPath>/` from
+// modulePrefix is the import-path prefix stripped from `go tool
+// cover` output to derive repo-relative paths matching the
+// schema's globs (typically `<importPath>/` from
 // `discover.ImportPath`).
-//
-// An empty cfg.Packages short-circuits with a notice — the
-// project simply has no thresholds declared yet.
 func Run(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
-	root, coverageDir, modulePrefix string, cfg Config,
+	root, coverageDir, modulePrefix string, cfg Config, opts RunOptions,
 ) error {
+	cfg = withDefaults(cfg)
 	if len(cfg.Packages) == 0 {
 		fmt.Fprintln(stdout, "coverage: no thresholds declared in .ergon.yaml; skipping")
 		return nil
@@ -46,10 +60,10 @@ func Run(
 		return err
 	}
 	if len(profiles) == 0 {
-		return fmt.Errorf("no coverprofiles found in %s — run `ergon test` first", coverageDir)
+		return fmt.Errorf("coverage: no coverprofiles found in %s — run `ergon test` first", coverageDir)
 	}
 
-	mergedPath, cleanup, err := mergeProfiles(profiles)
+	mergedPath, mergedBody, cleanup, err := mergeProfiles(profiles)
 	if err != nil {
 		return err
 	}
@@ -57,31 +71,269 @@ func Run(
 
 	funcLog, err := captureFuncCoverage(ctx, runner, root, mergedPath)
 	if err != nil {
-		return fmt.Errorf("go tool cover -func: %w", err)
+		return fmt.Errorf("coverage: go tool cover -func: %w", err)
 	}
 
 	rows := parseFuncLog(funcLog)
-	layers := compileLayers(cfg.Packages)
 	excludes := compileExcludes(cfg.Excludes)
+	skips := cfg.Skips
 
-	report := classify(rows, layers, excludes, modulePrefix)
-	printReport(stdout, stderr, report)
-	if len(report.Failures) > 0 {
-		return fmt.Errorf("%d function(s) below threshold", len(report.Failures))
+	targets := selectTargets(cfg.Packages, opts.Targets)
+	if len(targets) == 0 {
+		return fmt.Errorf("coverage: no matching targets for %v", opts.Targets)
 	}
+
+	s := style.Detect(stdout)
+	anyFailed := false
+
+	for _, target := range targets {
+		if renderTarget(stdout, s, target, rows, excludes, skips, modulePrefix, cfg.TopN, opts.Verbose, mergedBody) {
+			anyFailed = true
+		}
+	}
+
+	if anyFailed {
+		s.FinalVerdict(stderr, false,
+			"one or more functions below threshold (see per-target reports above)")
+		return fmt.Errorf("coverage: one or more functions below threshold")
+	}
+	s.FinalVerdict(stdout, true, "every gated function meets its layer threshold")
 	return nil
 }
 
+// withDefaults fills any zero-value field on cfg from [Defaults].
+func withDefaults(cfg Config) Config {
+	if cfg.TopN == 0 {
+		cfg.TopN = Defaults().TopN
+	}
+	return cfg
+}
+
+// selectTargets filters cfg.Packages by the user-supplied
+// targets. With no targets every package is selected as declared.
+//
+// For each requested target, the longest-prefix matching layer
+// supplies the threshold; the returned layer's Path narrows to the
+// request. This mirrors the per-function classification rule:
+// when two layers overlap (e.g. `internal/...` and
+// `internal/checks/...`), only the more-specific one applies.
+func selectTargets(packages []Layer, requested []string) []Layer {
+	if len(requested) == 0 {
+		return packages
+	}
+	var out []Layer
+	for _, t := range requested {
+		t = strings.TrimSuffix(t, "/")
+		match, ok := longestPrefixLayer(packages, t)
+		if !ok {
+			continue
+		}
+		base := strings.TrimSuffix(match.Path, "/...")
+		path := t + "/..."
+		if base == t {
+			path = base + "/..."
+		}
+		out = append(out, Layer{
+			Path:          path,
+			Line:          match.Line,
+			Branch:        match.Branch,
+			RequireBranch: match.RequireBranch,
+		})
+	}
+	return out
+}
+
+// longestPrefixLayer returns the declared layer whose base is the
+// longest prefix of t. Reports ok=false when no layer covers t at
+// all.
+func longestPrefixLayer(packages []Layer, t string) (Layer, bool) {
+	var (
+		best    Layer
+		bestLen = -1
+	)
+	for _, p := range packages {
+		base := strings.TrimSuffix(p.Path, "/...")
+		if base == t || strings.HasPrefix(t, base+"/") {
+			if len(base) > bestLen {
+				best = p
+				bestLen = len(base)
+			}
+		}
+	}
+	return best, bestLen >= 0
+}
+
+// renderTarget classifies every function under a single layer
+// and writes the per-target section to stdout. Returns true when
+// at least one function failed the threshold check.
+func renderTarget(
+	stdout io.Writer, s style.Style, layer Layer,
+	rows []funcRow, excludes []*regexp.Regexp,
+	skips []Skip, modulePrefix string, topN int, verbose bool,
+	mergedBody string,
+) bool {
+	prefix := strings.TrimSuffix(layer.Path, "/...")
+	s.Header(stdout, prefix, fmt.Sprintf("line ≥ %d%%", layer.Line))
+
+	var (
+		total, passing, failing, skipped, excluded int
+		failures                                   []Failure
+	)
+	for _, r := range rows {
+		rel := strings.TrimPrefix(r.Path, modulePrefix)
+		if !strings.HasPrefix(rel, prefix+"/") && rel != prefix {
+			continue
+		}
+		total++
+		if int(r.Pct) >= layer.Line {
+			passing++
+			continue
+		}
+		if matchesAny(rel, excludes) {
+			excluded++
+			continue
+		}
+		if matchesSkip(r.Func, rel, skips) {
+			skipped++
+			continue
+		}
+		failing++
+		failures = append(failures, Failure{
+			Path: rel, Func: r.Func, Pct: r.Pct, Threshold: layer.Line, Layer: prefix,
+		})
+	}
+
+	fmt.Fprintf(stdout,
+		"  Functions:  %d total · %d ≥ threshold · %d below · %d skipped · %d excluded\n",
+		total, passing, failing, skipped, excluded)
+
+	if failing == 0 {
+		fmt.Fprintf(stdout, "  Verdict:    %s\n\n", s.Verdict(true))
+		return false
+	}
+
+	fmt.Fprintf(stdout, "  Verdict:    %s\n\n", s.Verdict(false))
+
+	sort.SliceStable(failures, func(i, j int) bool {
+		return failures[i].Pct < failures[j].Pct
+	})
+
+	fmt.Fprintf(stdout, "  %s\n", s.Bolded("Functions below threshold"))
+	limit := min(topN, len(failures))
+	for _, f := range failures[:limit] {
+		fmt.Fprintf(stdout, "    %5.1f%%  %s  %s\n", f.Pct, f.Path, s.Dimmed(f.Func))
+	}
+	if len(failures) > limit {
+		fmt.Fprintf(stdout, "    %s\n", s.Dimmed(fmt.Sprintf("… and %d more function(s)", len(failures)-limit)))
+	}
+
+	if verbose {
+		writeUncoveredRanges(stdout, s, failures, modulePrefix, mergedBody)
+	}
+	fmt.Fprintln(stdout)
+	return true
+}
+
+// writeUncoveredRanges appends the uncovered block ranges (file
+// + line span + statement count) for every failing file in
+// failures. Ranges come from the merged coverprofile's `count=0`
+// rows.
+func writeUncoveredRanges(
+	w io.Writer, s style.Style, failures []Failure, modulePrefix, merged string,
+) {
+	files := uniqueFiles(failures)
+	if len(files) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\n  %s   %s\n", s.Bolded("Uncovered ranges"), s.Dimmed("(file:start-end (stmts))"))
+	for line := range strings.SplitSeq(merged, "\n") {
+		if line == "" || strings.HasPrefix(line, "mode:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 || fields[2] != "0" {
+			continue
+		}
+		path, span, ok := splitProfileHead(fields[0])
+		if !ok {
+			continue
+		}
+		rel := strings.TrimPrefix(path, modulePrefix)
+		if !slices.Contains(files, rel) {
+			continue
+		}
+		startEnd := strings.Split(span, ",")
+		if len(startEnd) != 2 {
+			continue
+		}
+		startLine := strings.SplitN(startEnd[0], ".", 2)[0]
+		endLine := strings.SplitN(startEnd[1], ".", 2)[0]
+		fmt.Fprintf(w, "    %s:%s-%s (%s stmts)\n", rel, startLine, endLine, fields[1])
+	}
+}
+
+// splitProfileHead pulls the path and start/end positions out of
+// the leading <path>:<sline>.<scol>,<eline>.<ecol> token of a
+// coverprofile row.
+func splitProfileHead(s string) (path, span string, ok bool) {
+	idx := strings.LastIndex(s, ":")
+	if idx <= 0 {
+		return "", "", false
+	}
+	return s[:idx], s[idx+1:], true
+}
+
+// uniqueFiles returns the deduplicated set of file paths covered
+// by failures, preserving first-occurrence order.
+func uniqueFiles(failures []Failure) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, f := range failures {
+		if _, dup := seen[f.Path]; dup {
+			continue
+		}
+		seen[f.Path] = struct{}{}
+		out = append(out, f.Path)
+	}
+	return out
+}
+
+// matchesSkip reports whether func/path satisfies any structural
+// skip rule. Both globs must match.
+func matchesSkip(funcName, path string, skips []Skip) bool {
+	for _, sk := range skips {
+		if globMatch(sk.FuncGlob, funcName) && globMatch(sk.FileGlob, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// globMatch implements the shell-style glob the bash scripts used
+// for SKIPS — `*` matches any run of characters (including path
+// separators), other characters match literally.
+func globMatch(pattern, s string) bool {
+	if pattern == "" {
+		return false
+	}
+	if pattern == "*" {
+		return true
+	}
+	re := "^" + regexp.QuoteMeta(pattern) + "$"
+	re = strings.ReplaceAll(re, `\*`, ".*")
+	matched, err := regexp.MatchString(re, s)
+	return err == nil && matched
+}
+
 // findProfiles returns every `*.out` file under dir, sorted by
-// name. An empty result is not an error; callers decide whether
-// that's a precondition failure.
+// name.
 func findProfiles(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read %s: %w", dir, err)
+		return nil, fmt.Errorf("coverage: read %s: %w", dir, err)
 	}
 	var out []string
 	for _, e := range entries {
@@ -95,29 +347,30 @@ func findProfiles(dir string) ([]string, error) {
 }
 
 // mergeProfiles concatenates every input profile into a single
-// temp file, dropping all but the first `mode:` line so the
-// result remains a valid coverprofile. Returns the path and a
-// cleanup function the caller defers.
-func mergeProfiles(paths []string) (string, func(), error) {
+// temp file. Returns the path, the merged body (used for verbose
+// mode's uncovered-range dump), and a cleanup function.
+func mergeProfiles(paths []string) (string, string, func(), error) {
 	f, err := os.CreateTemp("", "ergon-cov-*.out")
 	if err != nil {
-		return "", func() {}, fmt.Errorf("create temp: %w", err)
+		return "", "", func() {}, fmt.Errorf("coverage: create temp: %w", err)
 	}
 	cleanup := func() {
 		_ = f.Close()
 		_ = os.Remove(f.Name())
 	}
+	var body strings.Builder
 	modeWritten := false
 	for _, p := range paths {
-		body, err := os.ReadFile(p)
+		raw, err := os.ReadFile(p)
 		if err != nil {
 			cleanup()
-			return "", func() {}, fmt.Errorf("read %s: %w", p, err)
+			return "", "", func() {}, fmt.Errorf("coverage: read %s: %w", p, err)
 		}
-		for line := range strings.SplitSeq(string(body), "\n") {
+		for line := range strings.SplitSeq(string(raw), "\n") {
 			if strings.HasPrefix(line, "mode:") {
 				if !modeWritten {
 					fmt.Fprintln(f, line)
+					body.WriteString(line + "\n")
 					modeWritten = true
 				}
 				continue
@@ -126,14 +379,14 @@ func mergeProfiles(paths []string) (string, func(), error) {
 				continue
 			}
 			fmt.Fprintln(f, line)
+			body.WriteString(line + "\n")
 		}
 	}
-	return f.Name(), cleanup, nil
+	return f.Name(), body.String(), cleanup, nil
 }
 
 // captureFuncCoverage runs `go tool cover -func <profile>` and
-// returns the captured stdout. The command produces one line per
-// function plus a `total:` row at the end.
+// returns the captured stdout.
 func captureFuncCoverage(
 	ctx context.Context, runner xexec.Runner, root, profile string,
 ) (string, error) {
@@ -156,8 +409,7 @@ type funcRow struct {
 }
 
 // parseFuncLog converts `go tool cover -func` output into a slice
-// of [funcRow]. The `total:` summary row is dropped. Lines that
-// do not parse as <path>:<line>: <func> <pct>% are skipped.
+// of [funcRow]. The `total:` summary row is dropped.
 func parseFuncLog(out string) []funcRow {
 	var rows []funcRow
 	for line := range strings.SplitSeq(out, "\n") {
@@ -181,8 +433,7 @@ func parseFuncLog(out string) []funcRow {
 }
 
 // stripFileLocation removes the trailing `:<line>:` from a `go
-// tool cover -func` path token. Input `pkg/foo.go:42:` returns
-// `pkg/foo.go`.
+// tool cover -func` path token.
 func stripFileLocation(s string) string {
 	s = strings.TrimSuffix(s, ":")
 	if idx := strings.LastIndex(s, ":"); idx > 0 {
@@ -199,8 +450,8 @@ type compiledLayer struct {
 }
 
 // compileLayers translates each schema layer's glob into an
-// anchored regex and sorts the result by descending path length —
-// the longest-prefix layer wins when multiple match.
+// anchored regex and sorts the result by descending path length
+// — the longest-prefix layer wins.
 func compileLayers(layers []Layer) []compiledLayer {
 	out := make([]compiledLayer, 0, len(layers))
 	for _, l := range layers {
@@ -216,8 +467,8 @@ func compileLayers(layers []Layer) []compiledLayer {
 	return out
 }
 
-// compileExcludes turns the schema's exclude entries into compiled
-// regexes.
+// compileExcludes turns the schema's exclude entries into
+// compiled regexes.
 func compileExcludes(ex []Exclude) []*regexp.Regexp {
 	out := make([]*regexp.Regexp, 0, len(ex))
 	for _, e := range ex {
@@ -245,80 +496,9 @@ type Failure struct {
 	Layer     string
 }
 
-// Report bundles the per-run summary the printer formats.
-type Report struct {
-	Failures []Failure
-	Passing  int
-	Excluded int
-	Unscoped int
-}
-
-// classify walks every funcRow and decides whether it passes its
-// layer's threshold, is excluded, or fails. Functions outside any
-// layer's glob are counted under [Report.Unscoped] but do not fail
-// the run — the schema's authors choose what coverage applies to.
-func classify(
-	rows []funcRow, layers []compiledLayer,
-	excludes []*regexp.Regexp, modulePrefix string,
-) Report {
-	var r Report
-	for _, fr := range rows {
-		rel := strings.TrimPrefix(fr.Path, modulePrefix)
-		if matchesAny(rel, excludes) {
-			r.Excluded++
-			continue
-		}
-		layer, threshold, ok := layerFor(rel, layers)
-		if !ok {
-			r.Unscoped++
-			continue
-		}
-		if int(fr.Pct) >= threshold {
-			r.Passing++
-			continue
-		}
-		r.Failures = append(r.Failures, Failure{
-			Path:      rel,
-			Func:      fr.Func,
-			Pct:       fr.Pct,
-			Threshold: threshold,
-			Layer:     layer,
-		})
-	}
-	sort.SliceStable(r.Failures, func(i, j int) bool {
-		return r.Failures[i].Pct < r.Failures[j].Pct
-	})
-	return r
-}
-
-// layerFor returns the longest-prefix layer matching rel.
-func layerFor(rel string, layers []compiledLayer) (string, int, bool) {
-	for _, l := range layers {
-		if l.Pattern.MatchString(rel) {
-			return l.Path, l.Threshold, true
-		}
-	}
-	return "", 0, false
-}
-
 // matchesAny reports whether s matches any of the regexes.
 func matchesAny(s string, patterns []*regexp.Regexp) bool {
 	return slices.ContainsFunc(patterns, func(p *regexp.Regexp) bool {
 		return p.MatchString(s)
 	})
-}
-
-// printReport writes the per-run summary to stdout and the
-// per-failure list to stderr.
-func printReport(stdout, stderr io.Writer, r Report) {
-	fmt.Fprintf(stdout, "Coverage: %d passing, %d excluded, %d unscoped, %d failing\n",
-		r.Passing, r.Excluded, r.Unscoped, len(r.Failures))
-	if len(r.Failures) == 0 {
-		return
-	}
-	fmt.Fprintln(stderr, "Functions below threshold:")
-	for _, f := range r.Failures {
-		fmt.Fprintf(stderr, "  %5.1f%% < %d%%  %s  %s  (layer %s)\n",
-			f.Pct, f.Threshold, f.Path, f.Func, f.Layer)
-	}
 }

@@ -4,8 +4,11 @@
 package cmds
 
 import (
+	"path/filepath"
+
 	"github.com/spf13/cobra"
 
+	"go.thesmos.sh/ergon/internal/checks/coverage"
 	"go.thesmos.sh/ergon/internal/checks/errorprefix"
 	"go.thesmos.sh/ergon/internal/checks/skipexpiry"
 	"go.thesmos.sh/ergon/internal/checks/vuln"
@@ -17,15 +20,23 @@ import (
 )
 
 // checkCmd is `ergon check`. Bare invocation runs the full
-// pre-merge gate: mod verify, lint, test, skip-expiry,
-// error-prefix, vuln. Per-stage subcommands attach from their own
-// files.
+// pre-merge gate: mod verify → lint → test (which produces the
+// coverage profiles) → coverage thresholds → skip-expiry →
+// error-prefix → vuln. Each stage's failure short-circuits the
+// rest.
+//
+// Mutation testing (`ergon check mutation`) is intentionally NOT
+// part of the umbrella. `gremlins unleash` runs minutes per layer
+// and is not suitable for a pre-merge gate; run it explicitly via
+// the subcommand on a nightly cadence or before a release.
 var checkCmd = &cobra.Command{
 	Use:   "check",
 	Short: "Run the full pre-merge gate",
 	Long: "Runs the umbrella check sequence: mod verify, lint, test, " +
-		"skip-expiry, error-prefix, and vuln. Each stage's failure " +
-		"short-circuits the rest. Subcommands run individual stages.",
+		"coverage, skip-expiry, error-prefix, and vuln. Each stage's " +
+		"failure short-circuits the rest. Subcommands run individual " +
+		"stages.\n\nMutation testing is excluded — it is slow and " +
+		"belongs in a nightly job. Run `ergon check mutation` explicitly.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		ctx := cmd.Context()
@@ -33,6 +44,10 @@ var checkCmd = &cobra.Command{
 		runner := xexec.Command{}
 
 		root, mods, err := discover.Resolve(ctx, cfg.Modules)
+		if err != nil {
+			return err
+		}
+		importPath, err := discover.ImportPath(root)
 		if err != nil {
 			return err
 		}
@@ -48,6 +63,16 @@ var checkCmd = &cobra.Command{
 			return err
 		}
 		if err = test.Run(ctx, runner, stdout, stderr, in, cfg.Test); err != nil {
+			return err
+		}
+		name := cfg.Name
+		if name == "" {
+			name = filepath.Base(root)
+		}
+		coverageDir := filepath.Join(root, "."+name, "coverage")
+		if err = coverage.Run(ctx, runner, stdout, stderr,
+			root, coverageDir, importPath+"/", cfg.Checks.Coverage,
+			coverage.RunOptions{}); err != nil {
 			return err
 		}
 		goFiles, err := discover.GitFiles(ctx, runner, root, ".go")

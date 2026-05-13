@@ -118,18 +118,28 @@ func Regression(
 	if parseErr != nil {
 		return fmt.Errorf("bench: parse benchstat: %w", parseErr)
 	}
-	bad := regressions(results, cfg.Thresholds)
-	if len(bad) == 0 {
+	outcomes := classify(results, cfg.Thresholds)
+	warns := warnings(outcomes)
+	fails := failures(outcomes)
+
+	if len(warns) > 0 {
+		fmt.Fprintln(stdout, "\nAdvisory (B/op above threshold; not a regression):")
+		for _, w := range warns {
+			fmt.Fprintf(stdout, "  %s %s: %+.1f%% (threshold %.1f%%)\n",
+				w.Result.Bench, w.Result.Metric, w.Result.DeltaPercent, w.Threshold)
+		}
+	}
+
+	if len(fails) == 0 {
 		fmt.Fprintln(stdout, "\nbench: no regressions exceed configured thresholds")
 		return nil
 	}
 	fmt.Fprintln(stderr, "\nRegressions exceed configured thresholds:")
-	for _, r := range bad {
-		threshold := metricThreshold(r.Metric, cfg.Thresholds)
+	for _, f := range fails {
 		fmt.Fprintf(stderr, "  %s %s: %+.1f%% (threshold %.1f%%)\n",
-			r.Bench, r.Metric, r.DeltaPercent, threshold)
+			f.Result.Bench, f.Result.Metric, f.Result.DeltaPercent, f.Threshold)
 	}
-	return fmt.Errorf("bench: %d regression(s) exceed threshold", len(bad))
+	return fmt.Errorf("bench: %d regression(s) exceed threshold", len(fails))
 }
 
 // withDefaults fills any zero-value field on cfg from [Defaults].

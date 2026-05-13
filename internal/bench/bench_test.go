@@ -162,13 +162,13 @@ func TestRegression(t *testing.T) {
 		}
 	})
 
-	t.Run("regressions exceeding threshold surface as an error", func(t *testing.T) {
+	t.Run("statistically significant regressions surface as an error", func(t *testing.T) {
 		t.Parallel()
 		root := seededRoot(t)
 		runner := &fakeRunner{outputs: map[string]string{
 			"go":            "BenchmarkX-8\t1\t1 ns/op\n",
 			"benchstat":     "regressions in human form\n",
-			"benchstat-csv": sampleCSV, // +8.9% / +50% deltas vs 5% threshold
+			"benchstat-csv": significantCSV, // +50% sec/op + +25% allocs/op, both significant
 		}}
 
 		err := Regression(t.Context(), runner, io.Discard, io.Discard,
@@ -180,7 +180,55 @@ func TestRegression(t *testing.T) {
 			t.Fatalf("err = %v, want it to mention regression", err)
 		}
 	})
+
+	t.Run("insignificant deltas never fail, even when raw deltas exceed threshold", func(t *testing.T) {
+		t.Parallel()
+		root := seededRoot(t)
+		runner := &fakeRunner{outputs: map[string]string{
+			"go":            "BenchmarkX-8\t1\t1 ns/op\n",
+			"benchstat":     "noise in human form\n",
+			"benchstat-csv": sampleCSV, // every row marked `~`
+		}}
+
+		err := Regression(t.Context(), runner, io.Discard, io.Discard,
+			root, []modules.Module{{Dir: "."}}, testCfg(1, time.Minute), Defaults())
+		if err != nil {
+			t.Fatalf("Regression err: %v, want nil — insignificant deltas must not fail", err)
+		}
+	})
+
+	t.Run("advisory B/op warnings render to stdout without failing", func(t *testing.T) {
+		t.Parallel()
+		root := seededRoot(t)
+		runner := &fakeRunner{outputs: map[string]string{
+			"go":            "BenchmarkX-8\t1\t1 ns/op\n",
+			"benchstat":     "diff in human form\n",
+			"benchstat-csv": bytesOnlyCSV,
+		}}
+
+		var stdout strings.Builder
+		err := Regression(t.Context(), runner, &stdout, io.Discard,
+			root, []modules.Module{{Dir: "."}}, testCfg(1, time.Minute), Defaults())
+		if err != nil {
+			t.Fatalf("Regression err: %v, want nil — B/op is advisory only", err)
+		}
+		if !strings.Contains(stdout.String(), "Advisory") {
+			t.Fatalf("stdout = %q, want B/op advisory line", stdout.String())
+		}
+	})
 }
+
+// bytesOnlyCSV carries only a B/op block with a significant +20%
+// delta — exercises the advisory (warn-only) path.
+const bytesOnlyCSV = `goos: linux
+goarch: amd64
+pkg: foo
+cpu: Intel
+,/tmp/old.txt,,/tmp/new.txt,,,
+,B/op,CI,B/op,CI,vs base,P
+A-8,100,1%,120,1%,+20.00%,p=0.001 n=10
+geomean,100,,120,,+20.0%,
+`
 
 // noRegressionCSV is `benchstat -format csv` output where old and
 // new values are identical so every metric yields delta=0.

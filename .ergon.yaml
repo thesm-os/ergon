@@ -71,13 +71,23 @@ bench:
   # pinned reference output. `ergon bench regression` reads it
   # back at compare time.
   baseline_path: bench/baseline.txt
-  # Per-metric regression thresholds (percent). `ergon bench
-  # regression` parses `benchstat -format csv` and fails any
-  # per-benchmark per-metric delta above the matching threshold.
+  # Per-metric regression policy. `ergon bench regression` parses
+  # `benchstat -format csv` and applies a different policy per
+  # metric:
+  #   time_percent   sec/op hard-fails on significant deltas ≥ this
+  #                  percent. Insignificant changes (benchstat
+  #                  reports `~`) never fail.
+  #   allocs_percent allocs/op hard-fails on significant deltas
+  #                  STRICTLY above this percent. Zero means any
+  #                  positive change fails (contracts are ceilings).
+  #   bytes_percent  B/op is ADVISORY ONLY. Deltas at or above this
+  #                  percent surface as warnings; the metric never
+  #                  fails the run because B/op shifts too readily
+  #                  under unrelated struct-padding changes.
   thresholds:
     time_percent: 5
-    bytes_percent: 5
-    allocs_percent: 5
+    bytes_percent: 10
+    allocs_percent: 0
 
 # checks — `ergon check` and its subcommands
 checks:
@@ -110,6 +120,15 @@ checks:
         reason: tests are not part of the coverage gate
       - path: internal/version/...
         reason: ldflags-injected build metadata; no logic
+    # Structural skips orthogonal to the per-layer threshold: a
+    # function whose name matches func_glob AND whose file matches
+    # file_glob is reported under `skipped` but never fails the
+    # check. Used for assertion / contract branches the verifier
+    # framework only exercises against broken implementations.
+    skips: []
+    # Cap on the per-target list of below-threshold functions.
+    # Anything past the cap is collapsed into "… and N more".
+    top_n: 10
 
   # mutation — `ergon check mutation`
   #
