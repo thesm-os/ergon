@@ -22,7 +22,7 @@ var testBenchCmd = &cobra.Command{
 			return err
 		}
 		return test.Bench(cmd.Context(), xexec.Command{},
-			cmd.OutOrStdout(), cmd.ErrOrStderr(), in, cfg.Test)
+			cmd.OutOrStdout(), cmd.ErrOrStderr(), in, cfg.Test, fastMode)
 	},
 }
 

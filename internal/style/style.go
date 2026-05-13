@@ -133,6 +133,94 @@ func (s Style) FinalVerdict(w io.Writer, pass bool, message string) {
 	s.Rule(w)
 }
 
+// StageResult records one labelled outcome inside a stage. The
+// caller chooses what label means (a module directory, a sub-
+// stage name, a benchmark name); the renderer treats it as
+// opaque. Note is an optional human-facing annotation surfaced
+// next to the verdict (e.g. "skipped (no packages match build
+// tags)" or "1 finding").
+type StageResult struct {
+	// Label is the per-target prefix the verdict line opens with.
+	Label string
+
+	// Err is the underlying error, or nil on pass. Whether the
+	// summary treats this as PASS / SKIP / FAIL is governed by
+	// [StageResult.Skipped] plus the nil-ness of Err.
+	Err error
+
+	// Skipped, when true, renders the verdict as a dimmed dash —
+	// the work was intentionally not performed (e.g. a module
+	// whose packages are all gated out by build tags). Err must
+	// be nil when Skipped is true.
+	Skipped bool
+
+	// Note is an optional human-facing annotation appended to the
+	// verdict (e.g. an error summary, a skip reason, a finding
+	// count). Empty omits the annotation.
+	Note string
+}
+
+// Summary writes the closing block of a stage: per-target verdict
+// lines followed by an aggregate PASS/FAIL line. Labels are
+// right-padded so the verdicts line up.
+//
+// passMessage and failMessage are the human-facing summaries the
+// aggregate line carries — typically "every target passed" and
+// "N target(s) failed". The renderer fills in the verdict mark
+// and trailing rule itself.
+//
+// Returns true when at least one result carried a non-nil Err.
+func (s Style) Summary(w io.Writer, results []StageResult, passMessage, failMessage string) bool {
+	fmt.Fprintln(w)
+	width := 0
+	for _, r := range results {
+		if len(r.Label) > width {
+			width = len(r.Label)
+		}
+	}
+	failed := 0
+	for _, r := range results {
+		label := fmt.Sprintf("[%-*s]", width, r.Label)
+		switch {
+		case r.Skipped:
+			fmt.Fprintf(w, "  %s   %s\n", label, s.Dimmed("— "+resultNote(r, "skipped")))
+		case r.Err == nil:
+			fmt.Fprintf(w, "  %s   %s%s\n", label, s.Pass(), resultSuffix(r))
+		default:
+			failed++
+			fmt.Fprintf(w, "  %s   %s%s\n", label, s.Fail(), resultSuffix(r))
+		}
+	}
+	fmt.Fprintln(w)
+	if failed == 0 {
+		s.FinalVerdict(w, true, passMessage)
+		return false
+	}
+	if failMessage == "" {
+		failMessage = fmt.Sprintf("%d of %d target(s) failed", failed, len(results))
+	}
+	s.FinalVerdict(w, false, failMessage)
+	return true
+}
+
+// resultNote returns Note when set, otherwise fallback.
+func resultNote(r StageResult, fallback string) string {
+	if r.Note != "" {
+		return r.Note
+	}
+	return fallback
+}
+
+// resultSuffix returns "  <Note>" when r carries a Note, otherwise
+// the empty string. Used so the verdict line stays bare when
+// nothing extra needs to surface.
+func resultSuffix(r StageResult) string {
+	if r.Note == "" {
+		return ""
+	}
+	return "   " + r.Note
+}
+
 // Indent re-prefixes every non-empty line of body with the given
 // indent. Used to nest captured subprocess output (e.g. benchstat)
 // into the per-target report.

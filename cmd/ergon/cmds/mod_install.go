@@ -25,7 +25,7 @@ var modInstallCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return mod.Install(cmd.Context(), xexec.Command{}, cmd.OutOrStdout(), cmd.ErrOrStderr(), root, mods)
+		return mod.Install(cmd.Context(), xexec.Command{}, cmd.OutOrStdout(), cmd.ErrOrStderr(), root, mods, fastMode)
 	},
 }
 

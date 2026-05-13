@@ -28,7 +28,7 @@ func TestVet(t *testing.T) {
 		runner := &fakeRunner{}
 		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}, {Dir: "cli"}}}
 
-		if err := Vet(t.Context(), runner, io.Discard, io.Discard, in); err != nil {
+		if err := Vet(t.Context(), runner, io.Discard, io.Discard, in, false); err != nil {
 			t.Fatalf("Vet err: %v", err)
 		}
 		want := []string{
@@ -43,12 +43,40 @@ func TestVet(t *testing.T) {
 		runner := &fakeRunner{runErr: errors.New("vet finding")}
 		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "cli"}}}
 
-		err := Vet(t.Context(), runner, io.Discard, io.Discard, in)
+		err := Vet(t.Context(), runner, io.Discard, io.Discard, in, false)
 		if err == nil {
 			t.Fatal("Vet returned nil, want error")
 		}
 		if !strings.Contains(err.Error(), "[cli]") {
 			t.Fatalf("err = %v, want it to mention [cli]", err)
+		}
+	})
+
+	t.Run("default mode runs every module even when one fails", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{runErr: errors.New("vet finding")}
+		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}, {Dir: "cli"}, {Dir: "api"}}}
+
+		err := Vet(t.Context(), runner, io.Discard, io.Discard, in, false)
+		if err == nil {
+			t.Fatal("Vet returned nil, want aggregated error")
+		}
+		if len(runner.calls) != 3 {
+			t.Fatalf("calls = %d, want 3 (every module ran in default mode)", len(runner.calls))
+		}
+	})
+
+	t.Run("fast mode aborts at the first failure", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{runErr: errors.New("vet finding")}
+		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}, {Dir: "cli"}, {Dir: "api"}}}
+
+		err := Vet(t.Context(), runner, io.Discard, io.Discard, in, true)
+		if err == nil {
+			t.Fatal("Vet returned nil, want error")
+		}
+		if len(runner.calls) != 1 {
+			t.Fatalf("calls = %d, want 1 (fast mode aborts at first failure)", len(runner.calls))
 		}
 	})
 }
@@ -63,7 +91,7 @@ func TestGo(t *testing.T) {
 		runner := &fakeRunner{}
 		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}}}
 
-		if err := Go(t.Context(), runner, io.Discard, io.Discard, in); err != nil {
+		if err := Go(t.Context(), runner, io.Discard, io.Discard, in, false); err != nil {
 			t.Fatalf("Go err: %v", err)
 		}
 		assertCalls(t, runner.calls, []string{"/repo: golangci-lint run ./..."})
@@ -82,7 +110,7 @@ func TestAll(t *testing.T) {
 		runner := &fakeRunner{}
 
 		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
-		err := All(t.Context(), runner, io.Discard, io.Discard, in, markdown.Defaults(), license.Defaults())
+		err := All(t.Context(), runner, io.Discard, io.Discard, in, markdown.Defaults(), license.Defaults(), false)
 		if err != nil {
 			t.Fatalf("All err: %v", err)
 		}
@@ -93,7 +121,7 @@ func TestAll(t *testing.T) {
 		}
 	})
 
-	t.Run("vet failure short-circuits the remaining stages", func(t *testing.T) {
+	t.Run("default mode runs every stage and aggregates the failures", func(t *testing.T) {
 		t.Parallel()
 		root := buildTree(t, "main.go")
 		runner := &fakeRunner{decide: func(name string, args []string) error {
@@ -104,13 +132,36 @@ func TestAll(t *testing.T) {
 		}}
 
 		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
-		err := All(t.Context(), runner, io.Discard, io.Discard, in, markdown.Defaults(), license.Defaults())
+		err := All(t.Context(), runner, io.Discard, io.Discard, in, markdown.Defaults(), license.Defaults(), false)
+		if err == nil {
+			t.Fatal("All returned nil, want aggregated vet error")
+		}
+		// Every stage must have run.
+		want := []string{"go", "golangci-lint", "markdownlint-cli2", "go-license"}
+		got := commandNames(runner.calls)
+		if !slices.Equal(got, want) {
+			t.Fatalf("call sequence = %+v, want %+v (default mode runs every stage)", got, want)
+		}
+	})
+
+	t.Run("fast mode aborts at the first failing stage", func(t *testing.T) {
+		t.Parallel()
+		root := buildTree(t, "main.go")
+		runner := &fakeRunner{decide: func(name string, args []string) error {
+			if name == "go" && slices.Contains(args, "vet") {
+				return errors.New("vet finding")
+			}
+			return nil
+		}}
+
+		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
+		err := All(t.Context(), runner, io.Discard, io.Discard, in, markdown.Defaults(), license.Defaults(), true)
 		if err == nil {
 			t.Fatal("All returned nil, want vet error")
 		}
 		for _, c := range runner.calls {
 			if c.name == "golangci-lint" || c.name == "markdownlint-cli2" || c.name == "go-license" {
-				t.Fatalf("unexpected post-vet call: %q", c.name)
+				t.Fatalf("unexpected post-vet call: %q (fast mode should abort)", c.name)
 			}
 		}
 	})

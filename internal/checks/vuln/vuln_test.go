@@ -25,7 +25,7 @@ func TestRun(t *testing.T) {
 		runner := &fakeRunner{}
 
 		err := Run(t.Context(), runner, io.Discard, io.Discard, "/repo",
-			[]modules.Module{{Dir: "."}, {Dir: "cli"}})
+			[]modules.Module{{Dir: "."}, {Dir: "cli"}}, false)
 		if err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
@@ -35,17 +35,31 @@ func TestRun(t *testing.T) {
 		}
 	})
 
-	t.Run("first failure short-circuits and names the module", func(t *testing.T) {
+	t.Run("default mode runs every module and aggregates failures", func(t *testing.T) {
 		t.Parallel()
 		runner := &fakeRunner{runErr: errors.New("reachable vuln")}
 
 		err := Run(t.Context(), runner, io.Discard, io.Discard, "/repo",
-			[]modules.Module{{Dir: "cli"}, {Dir: "later"}})
+			[]modules.Module{{Dir: "cli"}, {Dir: "later"}}, false)
+		if err == nil {
+			t.Fatal("Run returned nil, want aggregated error")
+		}
+		if !strings.Contains(err.Error(), "[cli]") || !strings.Contains(err.Error(), "[later]") {
+			t.Fatalf("err = %v, want it to mention both modules", err)
+		}
+		if len(runner.calls) != 2 {
+			t.Fatalf("calls = %d, want 2 (default mode runs everything)", len(runner.calls))
+		}
+	})
+
+	t.Run("fast mode short-circuits at the first failure", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{runErr: errors.New("reachable vuln")}
+
+		err := Run(t.Context(), runner, io.Discard, io.Discard, "/repo",
+			[]modules.Module{{Dir: "cli"}, {Dir: "later"}}, true)
 		if err == nil {
 			t.Fatal("Run returned nil, want error")
-		}
-		if !strings.Contains(err.Error(), "[cli]") {
-			t.Fatalf("err = %v, want it to mention [cli]", err)
 		}
 		if len(runner.calls) != 1 {
 			t.Fatalf("calls = %d, want 1 (short-circuit)", len(runner.calls))

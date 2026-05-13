@@ -26,7 +26,7 @@ func TestInstall(t *testing.T) {
 		err := Install(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{
 			{Dir: "."},
 			{Dir: "cli"},
-		})
+		}, false)
 		if err != nil {
 			t.Fatalf("Install err: %v", err)
 		}
@@ -43,7 +43,7 @@ func TestInstall(t *testing.T) {
 		t.Parallel()
 		runner := &fakeRunner{runErr: errors.New("network down")}
 
-		err := Install(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{{Dir: "cli"}})
+		err := Install(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{{Dir: "cli"}}, false)
 		if err == nil {
 			t.Fatal("Install returned nil, want error")
 		}
@@ -65,7 +65,7 @@ func TestTidy(t *testing.T) {
 			{Dir: "."},
 			{Dir: "cli"},
 			{Dir: "frontend/golang"},
-		})
+		}, false)
 		if err != nil {
 			t.Fatalf("Tidy err: %v", err)
 		}
@@ -91,7 +91,7 @@ func TestVerify(t *testing.T) {
 		err := Verify(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{
 			{Dir: "."},
 			{Dir: "cli"},
-		})
+		}, false)
 		if err != nil {
 			t.Fatalf("Verify err: %v", err)
 		}
@@ -114,7 +114,7 @@ func TestVerify(t *testing.T) {
 		err := Verify(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{
 			{Dir: "."},
 			{Dir: "cli"},
-		})
+		}, false)
 		if !errors.Is(err, ErrDirty) {
 			t.Fatalf("Verify err = %v, want wrapped ErrDirty", err)
 		}
@@ -132,7 +132,7 @@ func TestVerify(t *testing.T) {
 			return nil
 		}}
 
-		err := Verify(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{{Dir: "."}})
+		err := Verify(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{{Dir: "."}}, false)
 		if errors.Is(err, ErrDirty) {
 			t.Fatalf("Verify err = %v, want a tidy failure, not ErrDirty", err)
 		}

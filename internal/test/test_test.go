@@ -32,7 +32,7 @@ func TestRun(t *testing.T) {
 			CoverageDir: t.TempDir(),
 		}
 
-		if err := Run(t.Context(), runner, io.Discard, io.Discard, in, Defaults()); err != nil {
+		if err := Run(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), false); err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
 		if len(runner.calls) != 2 {
@@ -63,7 +63,7 @@ func TestRun(t *testing.T) {
 		runner := &fakeRunner{}
 		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}}}
 
-		if err := Run(t.Context(), runner, io.Discard, io.Discard, in, Defaults()); err != nil {
+		if err := Run(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), false); err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
 		for _, a := range runner.calls[0].args {
@@ -83,7 +83,7 @@ func TestRace(t *testing.T) {
 		runner := &fakeRunner{}
 		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "cli"}}}
 
-		if err := Race(t.Context(), runner, io.Discard, io.Discard, in, Defaults()); err != nil {
+		if err := Race(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), false); err != nil {
 			t.Fatalf("Race err: %v", err)
 		}
 		assertContainsAll(t, runner.calls[0].args, []string{
@@ -101,7 +101,7 @@ func TestBench(t *testing.T) {
 		runner := &fakeRunner{}
 		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}}}
 
-		if err := Bench(t.Context(), runner, io.Discard, io.Discard, in, Defaults()); err != nil {
+		if err := Bench(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), false); err != nil {
 			t.Fatalf("Bench err: %v", err)
 		}
 		assertContainsAll(t, runner.calls[0].args, []string{

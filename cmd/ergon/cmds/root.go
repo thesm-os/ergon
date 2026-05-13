@@ -50,12 +50,24 @@ var cfg config.Config
 // `.ergon.yaml` from the current directory."
 var cfgPath string
 
+// fastMode captures --fast / -f. When true, every gate command
+// (lint, test, build, mod, check, vuln) short-circuits at the
+// first per-module or per-stage failure instead of running every
+// target and reporting an aggregated summary. The default (full
+// run) is more useful for CI; the fast flag exists for the dev
+// loop where one wants to fix the first failure and move on.
+var fastMode bool
+
 // init registers persistent flags on rootCmd. Subcommand files add
 // themselves to rootCmd from their own init() functions.
 func init() {
 	rootCmd.PersistentFlags().StringVar(
 		&cfgPath, "config", "",
 		"path to .ergon.yaml (defaults to repository root)",
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&fastMode, "fast", "f", false,
+		"fail-fast: stop at the first per-module or per-stage failure (default: run every target)",
 	)
 }
 

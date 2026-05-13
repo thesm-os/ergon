@@ -24,7 +24,7 @@ var buildCmd = &cobra.Command{
 			return err
 		}
 		return build.Run(cmd.Context(), xexec.Command{},
-			cmd.OutOrStdout(), cmd.ErrOrStderr(), root, mods)
+			cmd.OutOrStdout(), cmd.ErrOrStderr(), root, mods, fastMode)
 	},
 }
 

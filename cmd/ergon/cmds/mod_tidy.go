@@ -26,7 +26,7 @@ var modTidyCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return mod.Tidy(cmd.Context(), xexec.Command{}, cmd.OutOrStdout(), cmd.ErrOrStderr(), root, mods)
+		return mod.Tidy(cmd.Context(), xexec.Command{}, cmd.OutOrStdout(), cmd.ErrOrStderr(), root, mods, fastMode)
 	},
 }
 

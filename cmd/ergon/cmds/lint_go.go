@@ -25,7 +25,7 @@ var lintGoCmd = &cobra.Command{
 		}
 		return lint.Go(cmd.Context(), xexec.Command{},
 			cmd.OutOrStdout(), cmd.ErrOrStderr(),
-			lint.Inputs{Root: root, Modules: mods})
+			lint.Inputs{Root: root, Modules: mods}, fastMode)
 	},
 }
 

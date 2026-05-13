@@ -23,7 +23,7 @@ var lintVetCmd = &cobra.Command{
 		}
 		return lint.Vet(cmd.Context(), xexec.Command{},
 			cmd.OutOrStdout(), cmd.ErrOrStderr(),
-			lint.Inputs{Root: root, Modules: mods})
+			lint.Inputs{Root: root, Modules: mods}, fastMode)
 	},
 }
 

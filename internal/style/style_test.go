@@ -5,6 +5,7 @@ package style
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -76,6 +77,102 @@ func TestVerdict(t *testing.T) {
 	if !strings.Contains((Style{}).Verdict(false), "FAIL") {
 		t.Fatalf("Verdict(false) = %q, want FAIL", (Style{}).Verdict(false))
 	}
+}
+
+// TestSummary pins the stage-closing block: per-target verdict
+// lines, the aggregate verdict, label padding, and the boolean
+// return value reflecting whether any target failed.
+func TestSummary(t *testing.T) {
+	t.Parallel()
+
+	t.Run("every-pass run returns false and prints the pass message", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		failed := (Style{}).Summary(&buf, []StageResult{
+			{Label: "a"},
+			{Label: "b"},
+		}, "every module passed", "")
+		if failed {
+			t.Fatal("Summary returned failed=true for all-passing input")
+		}
+		body := buf.String()
+		if !strings.Contains(body, "PASS") {
+			t.Fatalf("Summary missing PASS marks: %q", body)
+		}
+		if !strings.Contains(body, "every module passed") {
+			t.Fatalf("Summary missing pass message: %q", body)
+		}
+	})
+
+	t.Run("any failure returns true and surfaces the failMessage", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		failed := (Style{}).Summary(&buf, []StageResult{
+			{Label: "a"},
+			{Label: "b", Err: errors.New("boom"), Note: "boom"},
+		}, "every module passed", "1 of 2 failed")
+		if !failed {
+			t.Fatal("Summary returned failed=false when one target carried Err")
+		}
+		body := buf.String()
+		if !strings.Contains(body, "1 of 2 failed") {
+			t.Fatalf("Summary missing failMessage: %q", body)
+		}
+		if !strings.Contains(body, "FAIL") {
+			t.Fatalf("Summary missing FAIL mark: %q", body)
+		}
+	})
+
+	t.Run("skipped target renders a dimmed dash, not a verdict", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		(Style{}).Summary(&buf, []StageResult{
+			{Label: "tests", Skipped: true, Note: "no packages"},
+		}, "every module passed", "")
+		// Look at the per-target line for [tests] specifically;
+		// the aggregate footer below it legitimately says PASS.
+		body := buf.String()
+		skipLine := ""
+		for line := range strings.SplitSeq(body, "\n") {
+			if strings.Contains(line, "[tests]") {
+				skipLine = line
+				break
+			}
+		}
+		if skipLine == "" {
+			t.Fatalf("no [tests] line in output: %q", body)
+		}
+		if strings.Contains(skipLine, "PASS") || strings.Contains(skipLine, "FAIL") {
+			t.Fatalf("skip line carries a verdict mark: %q", skipLine)
+		}
+		if !strings.Contains(skipLine, "no packages") {
+			t.Fatalf("skip line missing note: %q", skipLine)
+		}
+	})
+
+	t.Run("labels are padded to a uniform width", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		(Style{}).Summary(&buf, []StageResult{
+			{Label: "a"},
+			{Label: "much-longer"},
+		}, "ok", "")
+		// Look for the short label padded out to the long one's width.
+		if !strings.Contains(buf.String(), "[a          ]") {
+			t.Fatalf("Summary label padding missing: %q", buf.String())
+		}
+	})
+
+	t.Run("empty failMessage falls back to a default count", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		(Style{}).Summary(&buf, []StageResult{
+			{Label: "a", Err: errors.New("nope")},
+		}, "ok", "")
+		if !strings.Contains(buf.String(), "1 of 1 target(s) failed") {
+			t.Fatalf("Summary default fail message missing: %q", buf.String())
+		}
+	})
 }
 
 // TestIndent pins the multi-line indentation helper used to nest
