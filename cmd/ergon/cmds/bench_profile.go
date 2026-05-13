@@ -28,6 +28,7 @@ var benchProfileFlags struct {
 	block     bool
 	mutex     bool
 	outputDir string
+	topN      int
 }
 
 // benchProfileCmd is `ergon bench profile [pattern]`. Runs
@@ -82,6 +83,7 @@ var benchProfileCmd = &cobra.Command{
 				Block:     benchProfileFlags.block,
 				Mutex:     benchProfileFlags.mutex,
 				OutputDir: outputDir,
+				TopN:      benchProfileFlags.topN,
 			})
 	},
 }
@@ -105,5 +107,7 @@ func init() {
 		"Collect mutex profile (-mutexprofile); adds runtime overhead")
 	benchProfileCmd.Flags().StringVar(&benchProfileFlags.outputDir, "output-dir", "",
 		"Directory for the collected profiles (default: <root>/.<name>/profiles)")
+	benchProfileCmd.Flags().IntVar(&benchProfileFlags.topN, "top", bench.DefaultProfileTopN,
+		"How many rows of `go tool pprof -top` to summarize per artefact")
 	benchCmd.AddCommand(benchProfileCmd)
 }
