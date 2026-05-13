@@ -8,7 +8,7 @@
 .PHONY: help bootstrap install fmt license generate build clean \
         lint lint-md tidy check-tidy \
         test test-race test-bench test-fuzz test-coverage \
-        bench-baseline bench-regression \
+        bench-baseline bench-regression bench-profile \
         check check-coverage check-uncovered check-vuln \
         release
 
@@ -59,6 +59,11 @@ bench-baseline: ## Pin the current benchmark numbers to bench/baseline.txt
 	$(ERGON) bench baseline
 bench-regression: ## Fail when a new run regresses against the pinned baseline
 	$(ERGON) bench regression
+bench-profile: ## Collect CPU+mem pprof artefacts (PATTERN=. PACKAGE=./... MODULE=.)
+	$(ERGON) bench profile $(PATTERN) \
+		$(if $(MODULE),--module=$(MODULE),) \
+		$(if $(PACKAGE),--package=$(PACKAGE),) \
+		$(if $(TIME),--time=$(TIME),) $(FLAGS)
 
 check: ## Run the umbrella pre-merge gate (mod, lint, test, coverage, ...)
 	$(ERGON) check

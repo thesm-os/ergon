@@ -189,3 +189,16 @@ func TestIndent(t *testing.T) {
 		t.Fatalf("Indent = %q, want %q", got, want)
 	}
 }
+
+// BenchmarkIndent measures the cost of [Indent] over a realistic
+// captured-tool-output body (~50 lines). The function is on the
+// hot path of failed-stage rendering — every gate that surfaces
+// captured output runs it once per failing per-target line — so
+// regressions show up as a higher failed-stage wall time.
+func BenchmarkIndent(b *testing.B) {
+	body := strings.Repeat("file.go:42: some finding goes here\n", 50)
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = Indent(body, "      ")
+	}
+}
