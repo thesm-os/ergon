@@ -49,6 +49,16 @@ jobs:
           cache: true
       - name: Build ergon
         run: go build -o /usr/local/bin/ergon ./cmd/ergon
+      # `ergon bootstrap` installs every external binary ergon
+      # invokes (govulncheck, golangci-lint, gofumpt, gci,
+      # go-license, benchstat, gremlins). The dogfood job exercises
+      # the binary against its own repo so it must be able to run
+      # the gates that shell out — running bootstrap here doubles
+      # as a smoke test of the bootstrap command itself.
+      - name: ergon bootstrap
+        run: ergon bootstrap
+      - name: Ensure GOBIN is on PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: ergon mod verify
         run: ergon mod verify
       - name: ergon lint vet
@@ -59,16 +69,3 @@ jobs:
         run: ergon check error-prefix
       - name: ergon check vuln
         run: ergon check vuln
-
-  govulncheck:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
-      - name: govulncheck
-        run: govulncheck ./...
