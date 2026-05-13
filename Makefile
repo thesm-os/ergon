@@ -10,36 +10,62 @@
 # so the binary lives on PATH.
 ERGON ?= go run ./cmd/ergon
 
-help:               ; @$(ERGON) help
+help: ## Show this help (auto-generated from per-target annotations)
+	@awk 'BEGIN {FS = ":.*?## "; printf "Targets:\n"} \
+		/^[a-zA-Z][a-zA-Z_-]*:.*?## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' \
+		$(MAKEFILE_LIST)
 
-bootstrap:          ; $(ERGON) bootstrap
-install:            ; $(ERGON) mod install
-fmt:                ; $(ERGON) fmt
-license:            ; $(ERGON) license
-generate:           ; $(ERGON) generate
-build:              ; $(ERGON) build
-clean:              ; $(ERGON) clean
+bootstrap: ## Install development tools (gofumpt, gci, golangci-lint, govulncheck, ...)
+	$(ERGON) bootstrap
+install: ## Download + verify module dependencies
+	$(ERGON) mod install
+fmt: ## Format Go and Markdown sources
+	$(ERGON) fmt
+license: ## Apply SPDX license headers
+	$(ERGON) license
+generate: ## Run `go generate ./...` per module + format
+	$(ERGON) generate
+build: ## Compile every module's source (sanity check)
+	$(ERGON) build
+clean: ## Remove build and coverage artefacts
+	$(ERGON) clean
 
-lint:               ; $(ERGON) lint
-lint-md:            ; $(ERGON) lint md
+lint: ## Run the full lint suite (vet + golangci-lint + markdown + license)
+	$(ERGON) lint
+lint-md: ## Run markdownlint only
+	$(ERGON) lint md
 
-tidy:               ; $(ERGON) mod tidy
-check-tidy:         ; $(ERGON) mod verify
+tidy: ## Run `go mod tidy` per module
+	$(ERGON) mod tidy
+check-tidy: ## Fail when `go mod tidy` would change go.mod/go.sum
+	$(ERGON) mod verify
 
-test:               ; $(ERGON) test
-test-race:          ; $(ERGON) test race
-test-bench:         ; $(ERGON) test bench
-test-fuzz:          ; $(ERGON) test fuzz
-test-coverage:      ; $(ERGON) test coverage
+test: ## Run `go test` per module with coverage
+	$(ERGON) test
+test-race: ## Run `go test -race` per module
+	$(ERGON) test race
+test-bench: ## Run benchmarks per module (no thresholds)
+	$(ERGON) test bench
+test-fuzz: ## Run every Fuzz target for the configured duration
+	$(ERGON) test fuzz
+test-coverage: ## Render per-module coverage profiles to HTML
+	$(ERGON) test coverage
 
-bench-baseline:     ; $(ERGON) bench baseline
-bench-regression:   ; $(ERGON) bench regression
+bench-baseline: ## Pin the current benchmark numbers to bench/baseline.txt
+	$(ERGON) bench baseline
+bench-regression: ## Fail when a new run regresses against the pinned baseline
+	$(ERGON) bench regression
 
-check:              ; $(ERGON) check
-check-coverage:     ; $(ERGON) check coverage
-check-mutation:     ; $(ERGON) check mutation
-check-vuln:         ; $(ERGON) check vuln
+check: ## Run the umbrella pre-merge gate (mod, lint, test, coverage, ...)
+	$(ERGON) check
+check-coverage: ## Enforce per-layer coverage thresholds
+	$(ERGON) check coverage
+check-mutation: ## Run gremlins mutation testing per layer (slow)
+	$(ERGON) check mutation
+check-vuln: ## Run govulncheck per module
+	$(ERGON) check vuln
 
-release:            ; $(ERGON) release $(if $(MESSAGE),-m "$(MESSAGE)",) $(FLAGS)
+release: ## Bump versions and tag (MESSAGE="..." FLAGS=--major)
+	$(ERGON) release $(if $(MESSAGE),-m "$(MESSAGE)",) $(FLAGS)
 
 .DEFAULT_GOAL := help
