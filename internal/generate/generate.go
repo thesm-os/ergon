@@ -37,7 +37,8 @@ func Run(
 			Stderr: stderr,
 		}
 		fmt.Fprintf(stdout, "[%s] go generate ./...\n", m.Dir)
-		return runner.Run(ctx, opts, "go", "generate", "./...")
+		return xexec.RunAllowNoPackages(ctx, runner, opts, stdout, m.Dir,
+			"go", "generate", "./...")
 	})
 	if err != nil {
 		return err

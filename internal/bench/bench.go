@@ -163,7 +163,9 @@ func withDefaults(cfg Config) Config {
 // runBench runs the standard bench invocation
 // (`go test -bench=. -run=^$ -benchmem -count=N -timeout=T ./...`)
 // in each module. Output goes to sink; the caller composes sink
-// from a buffer plus stdout via io.MultiWriter.
+// from a buffer plus stdout via io.MultiWriter. A module whose
+// packages are all gated out by build tags is skipped with a
+// notice rather than failing the run.
 func runBench(
 	ctx context.Context, runner xexec.Runner, sink, stderr io.Writer,
 	root string, mods []modules.Module, testCfg test.Config,
@@ -179,9 +181,9 @@ func runBench(
 			"-timeout=" + testCfg.Timeout.String(),
 			"./...",
 		}
-		err := runner.Run(ctx,
+		err := xexec.RunAllowNoPackages(ctx, runner,
 			xexec.Options{Dir: cwd, Stdout: sink, Stderr: stderr},
-			"go", args...)
+			sink, m.Dir, "go", args...)
 		if err != nil {
 			return fmt.Errorf("[%s] go test -bench: %w", m.Dir, err)
 		}

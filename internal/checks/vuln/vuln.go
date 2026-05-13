@@ -18,7 +18,9 @@ import (
 
 // Run executes `govulncheck ./...` in each module. The tool exits
 // non-zero on any reachable vulnerability; first failure aborts the
-// run with the offending module's directory in the wrapper.
+// run with the offending module's directory in the wrapper. A
+// module whose packages are all gated out by build tags is skipped
+// with a notice rather than failing the run.
 func Run(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
 	root string, mods []modules.Module,
@@ -30,6 +32,7 @@ func Run(
 			Stderr: stderr,
 		}
 		fmt.Fprintf(stdout, "[%s] govulncheck ./...\n", m.Dir)
-		return runner.Run(ctx, opts, "govulncheck", "./...")
+		return xexec.RunAllowNoPackages(ctx, runner, opts, stdout, m.Dir,
+			"govulncheck", "./...")
 	})
 }

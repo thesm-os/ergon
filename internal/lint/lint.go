@@ -60,6 +60,8 @@ func All(
 // Vet runs `go vet ./...` per module. The stdlib analyser catches
 // the well-known correctness issues; failure is per-module so the
 // caller can identify which module's source surfaced the finding.
+// A module whose packages are all gated out by build tags is
+// skipped with a notice rather than failing the run.
 func Vet(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
 	in Inputs,
@@ -71,14 +73,17 @@ func Vet(
 			Stderr: stderr,
 		}
 		fmt.Fprintf(stdout, "[%s] go vet ./...\n", m.Dir)
-		return runner.Run(ctx, opts, "go", "vet", "./...")
+		return xexec.RunAllowNoPackages(ctx, runner, opts, stdout, m.Dir,
+			"go", "vet", "./...")
 	})
 }
 
 // Go runs `golangci-lint run ./...` per module. The linter reads
 // its own `.golangci.yml` for which checks to enable and any
 // runtime tuning (timeout, etc.) — ergon passes no flags so users
-// configure golangci-lint through its native surface.
+// configure golangci-lint through its native surface. A module
+// whose packages are all gated out by build tags is skipped with a
+// notice rather than failing the run.
 func Go(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
 	in Inputs,
@@ -90,6 +95,7 @@ func Go(
 			Stderr: stderr,
 		}
 		fmt.Fprintf(stdout, "[%s] golangci-lint run\n", m.Dir)
-		return runner.Run(ctx, opts, "golangci-lint", "run", "./...")
+		return xexec.RunAllowNoPackages(ctx, runner, opts, stdout, m.Dir,
+			"golangci-lint", "run", "./...")
 	})
 }

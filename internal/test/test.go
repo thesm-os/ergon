@@ -59,14 +59,16 @@ func Run(
 		}
 		args = append(args, "./...")
 		fmt.Fprintf(stdout, "[%s] go test ./...\n", m.Dir)
-		return runner.Run(ctx, optsFor(in.Root, m, stdout, stderr), "go", args...)
+		return xexec.RunAllowNoPackages(ctx, runner,
+			optsFor(in.Root, m, stdout, stderr), stdout, m.Dir, "go", args...)
 	})
 }
 
 // Race runs `go test -race ./...` per module with the configured
 // race-count and timeout. Coverage is not collected — race mode
 // rebuilds the runtime with sanity checks and is too slow to pair
-// with the standard coverage run.
+// with the standard coverage run. A module whose packages are all
+// gated out by build tags is skipped with a notice.
 func Race(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
 	in Inputs, cfg Config,
@@ -80,14 +82,16 @@ func Race(
 			"./...",
 		}
 		fmt.Fprintf(stdout, "[%s] go test -race ./...\n", m.Dir)
-		return runner.Run(ctx, optsFor(in.Root, m, stdout, stderr), "go", args...)
+		return xexec.RunAllowNoPackages(ctx, runner,
+			optsFor(in.Root, m, stdout, stderr), stdout, m.Dir, "go", args...)
 	})
 }
 
 // Bench runs the benchmarks in every module:
 // `go test -bench=. -run=^$ -benchmem -timeout=...`. The `-run=^$`
 // pattern excludes regular tests so the bench output is not mixed
-// with test results.
+// with test results. A module whose packages are all gated out by
+// build tags is skipped with a notice.
 func Bench(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
 	in Inputs, cfg Config,
@@ -102,7 +106,8 @@ func Bench(
 			"./...",
 		}
 		fmt.Fprintf(stdout, "[%s] go test -bench=.\n", m.Dir)
-		return runner.Run(ctx, optsFor(in.Root, m, stdout, stderr), "go", args...)
+		return xexec.RunAllowNoPackages(ctx, runner,
+			optsFor(in.Root, m, stdout, stderr), stdout, m.Dir, "go", args...)
 	})
 }
 

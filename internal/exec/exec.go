@@ -13,7 +13,9 @@
 package exec
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os/exec"
 )
@@ -66,4 +68,64 @@ func (Command) Run(ctx context.Context, opts Options, name string, args ...strin
 // LookPath wraps os/exec.LookPath unchanged.
 func (Command) LookPath(name string) (string, error) {
 	return exec.LookPath(name)
+}
+
+// noPackagesSignals are the stderr fragments tools emit when
+// `./...` matches no packages under the current build tags. The
+// tokens are stable across recent versions of each tool and
+// identify a benign "nothing to do for this module" condition
+// rather than a real failure.
+//
+//   - `matched no packages` — the Go toolchain (vet, test, build,
+//     generate) and anything that internally calls `go list`.
+//   - `no go files to analyze` — golangci-lint v2.
+//   - `no Go files in` — alternative phrasing emitted by some
+//     tools (e.g. older govulncheck variants).
+var noPackagesSignals = [][]byte{
+	[]byte("matched no packages"),
+	[]byte("no go files to analyze"),
+	[]byte("no Go files in"),
+}
+
+// RunAllowNoPackages runs name with args via runner and treats any
+// of the well-known "matched no packages" stderr signals as a soft
+// skip rather than a hard error. Used by every multi-module
+// command that walks `./...` per module so a module whose packages
+// are all gated by build tags (e.g. an integration-tests module
+// behind `//go:build integration`) does not fail the run.
+//
+// label is the per-module prefix the notice is tagged with so
+// users can see which module was skipped. opts.Stderr still
+// receives the subprocess's real stderr in every path — the skip
+// path also prints a clean one-line summary on notice so users
+// have an unambiguous signal that the failure was tolerated.
+func RunAllowNoPackages(
+	ctx context.Context, runner Runner, opts Options,
+	notice io.Writer, label, name string, args ...string,
+) error {
+	var captured bytes.Buffer
+	teedOpts := opts
+	if opts.Stderr == nil {
+		teedOpts.Stderr = &captured
+	} else {
+		teedOpts.Stderr = io.MultiWriter(opts.Stderr, &captured)
+	}
+	err := runner.Run(ctx, teedOpts, name, args...)
+	if err != nil && matchesNoPackages(captured.Bytes()) {
+		fmt.Fprintf(notice,
+			"[%s] no packages match the current build tags; skipped\n", label)
+		return nil
+	}
+	return err
+}
+
+// matchesNoPackages reports whether stderr carries any of the
+// recognised "no packages" signals.
+func matchesNoPackages(stderr []byte) bool {
+	for _, sig := range noPackagesSignals {
+		if bytes.Contains(stderr, sig) {
+			return true
+		}
+	}
+	return false
 }

@@ -21,6 +21,8 @@ import (
 // Run executes `go build ./...` in each discovered module. The
 // command surfaces every package-compile error; an unbuildable
 // module aborts the run with the offending dir in the wrapper.
+// A module whose packages are all gated out by build tags is
+// skipped with a notice rather than failing the run.
 func Run(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
 	root string, mods []modules.Module,
@@ -32,6 +34,7 @@ func Run(
 			Stderr: stderr,
 		}
 		fmt.Fprintf(stdout, "[%s] go build ./...\n", m.Dir)
-		return runner.Run(ctx, opts, "go", "build", "./...")
+		return xexec.RunAllowNoPackages(ctx, runner, opts, stdout, m.Dir,
+			"go", "build", "./...")
 	})
 }
