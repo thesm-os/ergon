@@ -289,6 +289,60 @@ func TestFuzz(t *testing.T) {
 		}
 	})
 
+	t.Run("ov.Pattern filters discovered targets", func(t *testing.T) {
+		t.Parallel()
+		root := buildFuzzTree(t, map[string]string{
+			"pkg/foo_test.go": fuzzSource("FuzzFoo"),
+			"pkg/bar_test.go": fuzzSource("FuzzBar"),
+		})
+		runner := &fakeRunner{}
+		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
+		if err := Fuzz(t.Context(), runner, io.Discard, io.Discard, in,
+			Defaults(), Override{Pattern: "Foo"}); err != nil {
+			t.Fatalf("Fuzz err: %v", err)
+		}
+		if len(runner.calls) != 1 {
+			t.Fatalf("calls = %d, want 1 (only FuzzFoo)", len(runner.calls))
+		}
+		if !strings.Contains(strings.Join(runner.calls[0].args, " "), "FuzzFoo") {
+			t.Fatalf("args = %+v, want -fuzz=^FuzzFoo$", runner.calls[0].args)
+		}
+	})
+
+	t.Run("invalid ov.Pattern is a regex compile error", func(t *testing.T) {
+		t.Parallel()
+		root := buildFuzzTree(t, map[string]string{
+			"pkg/foo_test.go": fuzzSource("FuzzFoo"),
+		})
+		runner := &fakeRunner{}
+		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
+		err := Fuzz(t.Context(), runner, io.Discard, io.Discard, in,
+			Defaults(), Override{Pattern: "[unterminated"})
+		if err == nil {
+			t.Fatal("Fuzz returned nil, want regex error")
+		}
+	})
+
+	t.Run("ov.Timeout passes through as -timeout", func(t *testing.T) {
+		t.Parallel()
+		root := buildFuzzTree(t, map[string]string{
+			"pkg/foo_test.go": fuzzSource("FuzzFoo"),
+		})
+		runner := &fakeRunner{}
+		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
+		if err := Fuzz(t.Context(), runner, io.Discard, io.Discard, in,
+			Defaults(), Override{Timeout: time.Minute}); err != nil {
+			t.Fatalf("Fuzz err: %v", err)
+		}
+		if len(runner.calls) != 1 {
+			t.Fatalf("calls = %d, want 1", len(runner.calls))
+		}
+		joined := strings.Join(runner.calls[0].args, " ")
+		if !strings.Contains(joined, "-timeout=") {
+			t.Fatalf("args = %+v, want -timeout flag", runner.calls[0].args)
+		}
+	})
+
 	t.Run("first-target failure short-circuits remaining targets", func(t *testing.T) {
 		t.Parallel()
 		root := buildFuzzTree(t, map[string]string{
@@ -375,7 +429,9 @@ type recordedCall struct {
 
 func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
 	f.mu.Lock()
-	f.calls = append(f.calls, recordedCall{dir: opts.Dir, name: name, args: slices.Clone(args)})
+	// filepath.ToSlash normalises Windows backslashes so the
+	// per-dir assertions stay portable across operating systems.
+	f.calls = append(f.calls, recordedCall{dir: filepath.ToSlash(opts.Dir), name: name, args: slices.Clone(args)})
 	f.mu.Unlock()
 	return f.runErr
 }

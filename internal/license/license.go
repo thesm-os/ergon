@@ -113,7 +113,9 @@ func goFiles(root string, excludeDirs, excludeFiles []string) ([]string, error) 
 		if err != nil {
 			return err
 		}
-		out = append(out, rel)
+		// Emit forward-slash paths so go-license (and test
+		// assertions) get the same shape regardless of host OS.
+		out = append(out, filepath.ToSlash(rel))
 		return nil
 	})
 	if err != nil {

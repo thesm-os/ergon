@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -174,8 +175,10 @@ type fakeRunner struct {
 }
 
 func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
+	// filepath.ToSlash normalises Windows backslashes so the call
+	// comparisons stay portable across operating systems.
 	f.mu.Lock()
-	f.calls = append(f.calls, opts.Dir+": "+name+" "+strings.Join(args, " "))
+	f.calls = append(f.calls, filepath.ToSlash(opts.Dir)+": "+name+" "+strings.Join(args, " "))
 	f.mu.Unlock()
 	if f.decide != nil {
 		return f.decide(name, args)

@@ -9,8 +9,40 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/viper"
+
 	"go.thesmos.sh/ergon/internal/bootstrap"
 )
+
+// TestConfigPathFor pins the error-message path resolver across
+// its three branches: viper has a known file, no viper file but a
+// requested path, neither.
+func TestConfigPathFor(t *testing.T) {
+	t.Parallel()
+
+	t.Run("falls back to the literal default", func(t *testing.T) {
+		t.Parallel()
+		if got := configPathFor(viper.New(), ""); got != ".ergon.yaml" {
+			t.Errorf("configPathFor = %q, want .ergon.yaml", got)
+		}
+	})
+
+	t.Run("returns the requested path when viper has nothing", func(t *testing.T) {
+		t.Parallel()
+		if got := configPathFor(viper.New(), "/custom.yaml"); got != "/custom.yaml" {
+			t.Errorf("configPathFor = %q, want /custom.yaml", got)
+		}
+	})
+
+	t.Run("returns the viper-resolved path when present", func(t *testing.T) {
+		t.Parallel()
+		v := viper.New()
+		v.SetConfigFile("/from-viper.yaml")
+		if got := configPathFor(v, "/from-flag.yaml"); got != "/from-viper.yaml" {
+			t.Errorf("configPathFor = %q, want /from-viper.yaml", got)
+		}
+	})
+}
 
 // TestLoad pins the loader's contract: defaults apply when no file
 // is present, fields parsed from the file override the defaults,

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
+	"go.thesmos.sh/ergon/internal/style"
 )
 
 // TestRun pins the package's top-level contract: positional targets
@@ -381,6 +382,92 @@ func TestFormatElapsed(t *testing.T) {
 	}
 }
 
+// TestShortStatus pins the 1- or 2-letter tag the verbose
+// non-killed-mutant dump prefixes each line with.
+func TestShortStatus(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		in, want string
+	}{
+		{statusLived, "L"},
+		{statusNotCovered, "NC"},
+		{statusTimedOut, "TO"},
+		{"OTHER", "?"},
+	}
+	for _, tc := range cases {
+		if got := shortStatus(tc.in); got != tc.want {
+			t.Errorf("shortStatus(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestWriteContributingFiles pins the failure-only file
+// breakdown the renderer emits under a failing target. The top-N
+// cap collapses surplus rows into a "… and N more file(s)" tail.
+func TestWriteContributingFiles(t *testing.T) {
+	t.Parallel()
+
+	files := []fileBreakdown{
+		{Path: "a.go", Total: 5, Lived: 3, NotCovered: 1, TimedOut: 1},
+		{Path: "b.go", Total: 1, Lived: 1},
+	}
+	var buf strings.Builder
+	writeContributingFiles(&buf, style.Style{}, "core", files)
+	body := buf.String()
+	for _, want := range []string{"Contributing files", "core/a.go", "L:3", "NC:1", "TO:1", "core/b.go"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("contributing-files output missing %q: %q", want, body)
+		}
+	}
+}
+
+// TestWriteNonKilledMutants pins the verbose-mode mutant dump:
+// every non-killed mutant in the captured gremlins log surfaces
+// with its short-status tag and source location.
+func TestWriteNonKilledMutants(t *testing.T) {
+	t.Parallel()
+
+	files := []fileBreakdown{{Path: "a.go", Total: 1, Lived: 1}}
+	gremlinsOut := "    LIVED CONDITIONALS_NEGATION at a.go:5:7\n"
+	var buf strings.Builder
+	writeNonKilledMutants(&buf, style.Style{}, gremlinsOut, files)
+	body := buf.String()
+	for _, want := range []string{"Non-killed mutants", "L", "CONDITIONALS_NEGATION", "a.go:5:7"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("non-killed-mutants output missing %q: %q", want, body)
+		}
+	}
+}
+
+// TestDefaultWorkers pins the runtime.NumCPU/4 heuristic with a
+// floor of 2 — the same shape the bash script used. The pure
+// helper [workersFor] is exercised across the floor and above-
+// floor branches; [defaultWorkers] is exercised on the host.
+func TestDefaultWorkers(t *testing.T) {
+	t.Parallel()
+
+	if got := defaultWorkers(); got < 2 {
+		t.Errorf("defaultWorkers = %d, want at least 2", got)
+	}
+
+	cases := []struct {
+		numCPU int
+		want   int
+	}{
+		{1, 2}, // floor
+		{4, 2}, // floor (4/4 == 1, below the floor of 2)
+		{8, 2}, // floor (8/4 == 2, exactly the floor)
+		{12, 3},
+		{32, 8},
+	}
+	for _, tc := range cases {
+		if got := workersFor(tc.numCPU); got != tc.want {
+			t.Errorf("workersFor(%d) = %d, want %d", tc.numCPU, got, tc.want)
+		}
+	}
+}
+
 // TestLayerDir pins the glob → directory conversion.
 func TestLayerDir(t *testing.T) {
 	t.Parallel()
@@ -403,7 +490,9 @@ type fakeRunner struct {
 }
 
 func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
-	f.calls = append(f.calls, opts.Dir+": "+name+" "+strings.Join(args, " "))
+	// filepath.ToSlash normalises Windows backslashes so the call
+	// comparisons stay portable across operating systems.
+	f.calls = append(f.calls, filepath.ToSlash(opts.Dir)+": "+name+" "+strings.Join(args, " "))
 	if opts.Stdout != nil {
 		_, _ = opts.Stdout.Write([]byte(f.output))
 	}

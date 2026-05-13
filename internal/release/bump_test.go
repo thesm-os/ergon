@@ -44,6 +44,31 @@ func TestParseBumpLevel(t *testing.T) {
 	})
 }
 
+// TestString pins the [BumpLevel.String] mapping the CLI flag's
+// help text and the rendered plan rows depend on. The default
+// branch covers stray integer values defensively.
+func TestString(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		level BumpLevel
+		want  string
+	}{
+		{BumpNone, "none"},
+		{BumpPatch, "patch"},
+		{BumpMinor, "minor"},
+		{BumpMajor, "major"},
+	} {
+		if got := tc.level.String(); got != tc.want {
+			t.Errorf("BumpLevel(%d).String() = %q, want %q", tc.level, got, tc.want)
+		}
+	}
+
+	if got := BumpLevel(99).String(); got != "BumpLevel(99)" {
+		t.Errorf("BumpLevel(99).String() = %q, want BumpLevel(99)", got)
+	}
+}
+
 // TestBumpSemver pins the per-level increment behaviour plus the
 // invalid-input rejection. Table-driven across the four supported
 // levels; an unparseable input is exercised separately.

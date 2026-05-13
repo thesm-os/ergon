@@ -242,6 +242,80 @@ func TestRunAllowSkip(t *testing.T) {
 	})
 }
 
+// TestSingle pins the single-target stage renderer along its
+// three branches: clean pass, captured-output failure, and the
+// verbose live-stream mode.
+func TestSingle(t *testing.T) {
+	t.Parallel()
+
+	t.Run("clean pass renders the pass verdict line", func(t *testing.T) {
+		t.Parallel()
+		var buf strings.Builder
+		err := Single(t.Context(), &buf, Options{},
+			"my-stage", "details", "all clear", "",
+			func(_ context.Context, _, _ io.Writer) error { return nil })
+		if err != nil {
+			t.Fatalf("Single err: %v", err)
+		}
+		if !strings.Contains(buf.String(), "all clear") {
+			t.Fatalf("output missing pass message: %q", buf.String())
+		}
+	})
+
+	t.Run("failure reveals captured output beneath the verdict", func(t *testing.T) {
+		t.Parallel()
+		var buf strings.Builder
+		err := Single(t.Context(), &buf, Options{},
+			"my-stage", "details", "", "bad things",
+			func(_ context.Context, stdout, _ io.Writer) error {
+				_, _ = io.WriteString(stdout, "tool diagnostic\n")
+				return errors.New("boom")
+			})
+		if err == nil {
+			t.Fatal("Single err = nil, want non-nil")
+		}
+		out := buf.String()
+		if !strings.Contains(out, "bad things") {
+			t.Fatalf("output missing fail message: %q", out)
+		}
+		if !strings.Contains(out, "tool diagnostic") {
+			t.Fatalf("output missing captured body: %q", out)
+		}
+	})
+
+	t.Run("verbose mode streams output live and still emits the verdict", func(t *testing.T) {
+		t.Parallel()
+		var buf strings.Builder
+		err := Single(t.Context(), &buf, Options{Verbose: true},
+			"my-stage", "details", "all clear", "",
+			func(_ context.Context, stdout, _ io.Writer) error {
+				_, _ = io.WriteString(stdout, "live body\n")
+				return nil
+			})
+		if err != nil {
+			t.Fatalf("Single err: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "live body") {
+			t.Fatalf("verbose output missing streamed body: %q", out)
+		}
+	})
+
+	t.Run("empty pass message defaults to `<title> passed`", func(t *testing.T) {
+		t.Parallel()
+		var buf strings.Builder
+		err := Single(t.Context(), &buf, Options{},
+			"vuln-scan", "details", "", "",
+			func(_ context.Context, _, _ io.Writer) error { return nil })
+		if err != nil {
+			t.Fatalf("Single err: %v", err)
+		}
+		if !strings.Contains(buf.String(), "vuln-scan passed") {
+			t.Fatalf("output missing default pass message: %q", buf.String())
+		}
+	})
+}
+
 // fakeRunner satisfies [xexec.Runner] for the stage tests. It
 // writes stdoutOut to opts.Stdout and stderrOut to opts.Stderr
 // (each only when the destination is non-nil) and returns err

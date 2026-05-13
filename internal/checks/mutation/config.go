@@ -105,7 +105,14 @@ func Defaults() Config {
 // script uses the same heuristic so a developer who switches from
 // the script to ergon sees the same parallelism.
 func defaultWorkers() int {
-	n := runtime.NumCPU() / 4
+	return workersFor(runtime.NumCPU())
+}
+
+// workersFor is the pure form of [defaultWorkers] — extracted so
+// the floor branch can be exercised without depending on the host
+// CPU count.
+func workersFor(numCPU int) int {
+	n := numCPU / 4
 	if n < 2 {
 		return 2
 	}

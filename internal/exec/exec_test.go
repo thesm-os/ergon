@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -47,6 +48,15 @@ func TestCommand(t *testing.T) {
 
 	t.Run("Run honours Dir for the subprocess working directory", func(t *testing.T) {
 		t.Parallel()
+		// Skipped on Windows: `pwd` is not on PATH by default on
+		// the runner, and when it is (via Git Bash) the output
+		// is in Unix form (/c/Users/...) which does not match
+		// the Windows-style t.TempDir() path. The Options.Dir
+		// plumbing is the same `os/exec` code path on every OS,
+		// so the Unix-only assertion still pins the behaviour.
+		if runtime.GOOS == "windows" {
+			t.Skip("pwd not portable to Windows")
+		}
 		dir := t.TempDir()
 		var stdout bytes.Buffer
 		err := Command{}.Run(t.Context(),
@@ -70,6 +80,33 @@ func TestCommand(t *testing.T) {
 			t.Fatalf("LookPath err = %v, want ErrNotFound", err)
 		}
 	})
+}
+
+// TestIsNoPackagesSignal pins the public detector against the
+// three signals [RunAllowNoPackages] tolerates so callers that
+// drive their own subprocess can apply the same soft-skip.
+func TestIsNoPackagesSignal(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"go toolchain", `go: warning: "./..." matched no packages`, true},
+		{"golangci-lint v2", "no go files to analyze", true},
+		{"alt phrasing", "no Go files in /pkg", true},
+		{"unrelated", "panic: runtime error", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsNoPackagesSignal([]byte(tc.in)); got != tc.want {
+				t.Errorf("IsNoPackagesSignal(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
 }
 
 // TestRunAllowNoPackages pins the soft-skip contract: a failure

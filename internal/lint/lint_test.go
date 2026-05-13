@@ -223,8 +223,10 @@ type recordedCall struct {
 }
 
 func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
+	// filepath.ToSlash normalises Windows backslashes so the call
+	// comparisons stay portable across operating systems.
 	f.mu.Lock()
-	f.calls = append(f.calls, recordedCall{dir: opts.Dir, name: name, args: slices.Clone(args)})
+	f.calls = append(f.calls, recordedCall{dir: filepath.ToSlash(opts.Dir), name: name, args: slices.Clone(args)})
 	f.mu.Unlock()
 	if f.decide != nil {
 		return f.decide(name, args)

@@ -6,6 +6,7 @@ package style
 import (
 	"bytes"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -33,6 +34,45 @@ func TestDetect(t *testing.T) {
 			t.Fatalf("Style = %+v, want empty with NO_COLOR set", s)
 		}
 	})
+}
+
+// TestIsTTY pins the writer-classifier across the three input
+// shapes: non-*os.File rejects; a real os.File reports the device
+// mode it actually has on disk.
+func TestIsTTY(t *testing.T) {
+	t.Parallel()
+
+	t.Run("non-file writer is never a TTY", func(t *testing.T) {
+		t.Parallel()
+		if isTTY(&bytes.Buffer{}) {
+			t.Fatal("isTTY(buffer) = true, want false")
+		}
+	})
+
+	t.Run("regular file is not a TTY", func(t *testing.T) {
+		t.Parallel()
+		f, err := os.CreateTemp(t.TempDir(), "ttytest")
+		if err != nil {
+			t.Fatalf("CreateTemp: %v", err)
+		}
+		defer f.Close()
+		if isTTY(f) {
+			t.Fatal("isTTY(regular file) = true, want false")
+		}
+	})
+}
+
+// TestResultNote pins the fallback selector: a populated Note
+// wins, otherwise fallback is used.
+func TestResultNote(t *testing.T) {
+	t.Parallel()
+
+	if got := resultNote(StageResult{Note: "explicit"}, "fb"); got != "explicit" {
+		t.Errorf("got %q, want explicit", got)
+	}
+	if got := resultNote(StageResult{}, "fb"); got != "fb" {
+		t.Errorf("got %q, want fb", got)
+	}
 }
 
 // TestRule pins the horizontal-divider output.
@@ -67,6 +107,30 @@ func TestHeader(t *testing.T) {
 	// section's opening rule as their separator.
 	if n := strings.Count(got, rule); n != 1 {
 		t.Fatalf("Header should have exactly one rule line, got %d: %q", n, got)
+	}
+}
+
+// TestWarn pins the advisory WARN badge.
+func TestWarn(t *testing.T) {
+	t.Parallel()
+
+	if !strings.Contains((Style{}).Warn(), "WARN") {
+		t.Fatalf("Warn() = %q, want it to contain WARN", (Style{}).Warn())
+	}
+}
+
+// TestBolded pins the bold-text wrap: zero Style returns the
+// bare text, populated Style wraps in escape codes.
+func TestBolded(t *testing.T) {
+	t.Parallel()
+
+	if got := (Style{}).Bolded("hi"); got != "hi" {
+		t.Fatalf("zero-Style Bolded(hi) = %q, want bare text", got)
+	}
+	s := Style{Bold: "\033[1m", Reset: "\033[0m"}
+	got := s.Bolded("hi")
+	if !strings.Contains(got, "hi") || !strings.HasPrefix(got, "\033[1m") {
+		t.Fatalf("Bolded = %q, want it to wrap hi in bold escapes", got)
 	}
 }
 

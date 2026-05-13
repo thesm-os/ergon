@@ -15,6 +15,18 @@ import (
 	xexec "go.thesmos.sh/ergon/internal/exec"
 )
 
+// TestDefaults pins the default [Config]: empty ExtraTools so the
+// built-in [DefaultTools] list is the only thing [Run] installs
+// out of the box.
+func TestDefaults(t *testing.T) {
+	t.Parallel()
+
+	got := Defaults()
+	if len(got.ExtraTools) != 0 {
+		t.Fatalf("Defaults().ExtraTools = %+v, want empty", got.ExtraTools)
+	}
+}
+
 // TestRun pins the contract of [Run]: every default tool gets a
 // `go install` invocation, per-repo extras are appended after the
 // defaults, a missing markdownlint-cli2 triggers an npm install

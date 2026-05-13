@@ -285,6 +285,16 @@ func packageSlug(pkg string) string {
 	return slug
 }
 
+// Profile-kind identifiers used as the [profileArtefact.Kind]
+// values. They name the pprof sample type a given artefact
+// captures and are visible in the rendered summary headers.
+const (
+	profileKindCPU   = "cpu"
+	profileKindMem   = "mem"
+	profileKindBlock = "block"
+	profileKindMutex = "mutex"
+)
+
 // profileArtefact records one collected profile.
 type profileArtefact struct {
 	// Kind is the human-facing name (cpu / mem / block / mutex).
@@ -301,25 +311,25 @@ func plannedArtefacts(opts ProfileOptions, dir string) []profileArtefact {
 	var out []profileArtefact
 	if opts.CPU {
 		out = append(out, profileArtefact{
-			Kind: "cpu", Flag: "-cpuprofile",
+			Kind: profileKindCPU, Flag: "-cpuprofile",
 			Path: filepath.Join(dir, "cpu.prof"),
 		})
 	}
 	if opts.Mem {
 		out = append(out, profileArtefact{
-			Kind: "mem", Flag: "-memprofile",
+			Kind: profileKindMem, Flag: "-memprofile",
 			Path: filepath.Join(dir, "mem.prof"),
 		})
 	}
 	if opts.Block {
 		out = append(out, profileArtefact{
-			Kind: "block", Flag: "-blockprofile",
+			Kind: profileKindBlock, Flag: "-blockprofile",
 			Path: filepath.Join(dir, "block.prof"),
 		})
 	}
 	if opts.Mutex {
 		out = append(out, profileArtefact{
-			Kind: "mutex", Flag: "-mutexprofile",
+			Kind: profileKindMutex, Flag: "-mutexprofile",
 			Path: filepath.Join(dir, "mutex.prof"),
 		})
 	}
@@ -334,7 +344,7 @@ func artefactFlags(artefacts []profileArtefact) []string {
 	args := make([]string, 0, len(artefacts)*2+1)
 	for _, a := range artefacts {
 		args = append(args, a.Flag+"="+a.Path)
-		if a.Kind == "mem" {
+		if a.Kind == profileKindMem {
 			args = append(args, "-benchmem")
 		}
 	}
@@ -482,7 +492,7 @@ func profileWithDefaults(opts ProfileOptions) ProfileOptions {
 		opts.Pattern = "."
 	}
 	if opts.Packages == "" {
-		opts.Packages = "./..."
+		opts.Packages = allPackages
 	}
 	if opts.BenchTime == 0 {
 		opts.BenchTime = DefaultBenchTime

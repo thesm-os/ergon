@@ -5,12 +5,105 @@ package errorprefix
 
 import (
 	"bytes"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestIsErrorsNew pins the syntactic detection: only the exact
+// `errors.New` selector matches; aliases and unrelated selectors
+// are rejected.
+func TestIsErrorsNew(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		expr string
+		want bool
+	}{
+		{"errors.New", true},
+		{"fmt.Errorf", false},
+		{"foo.New", false},
+		{"errors.Is", false},
+		{"errors", false},
+		{"42", false},
+	}
+	for _, tc := range cases {
+		expr, err := parser.ParseExpr(tc.expr + "()")
+		if err != nil {
+			t.Fatalf("ParseExpr(%q): %v", tc.expr, err)
+		}
+		call := expr.(*ast.CallExpr)
+		if got := isErrorsNew(call.Fun); got != tc.want {
+			t.Errorf("isErrorsNew(%q) = %v, want %v", tc.expr, got, tc.want)
+		}
+	}
+}
+
+// TestStringLiteral pins the string-literal extractor: only
+// double-quoted string literals decode; integer literals, non-
+// literals, and malformed escapes return ok=false.
+func TestStringLiteral(t *testing.T) {
+	t.Parallel()
+
+	t.Run("quoted string decodes", func(t *testing.T) {
+		t.Parallel()
+		expr, _ := parser.ParseExpr(`"hello world"`)
+		got, ok := stringLiteral(expr)
+		if !ok || got != "hello world" {
+			t.Fatalf("got %q ok=%v, want \"hello world\" ok=true", got, ok)
+		}
+	})
+
+	t.Run("integer literal rejected", func(t *testing.T) {
+		t.Parallel()
+		expr, _ := parser.ParseExpr(`42`)
+		_, ok := stringLiteral(expr)
+		if ok {
+			t.Fatal("ok=true, want false for non-string literal")
+		}
+	})
+
+	t.Run("identifier rejected", func(t *testing.T) {
+		t.Parallel()
+		expr, _ := parser.ParseExpr(`foo`)
+		_, ok := stringLiteral(expr)
+		if ok {
+			t.Fatal("ok=true, want false for identifier")
+		}
+	})
+
+	t.Run("malformed quote rejected", func(t *testing.T) {
+		t.Parallel()
+		// Construct a BasicLit with an unparseable value directly —
+		// parser would otherwise reject the input.
+		bad := &ast.BasicLit{Kind: token.STRING, Value: `"\xZZ"`}
+		_, ok := stringLiteral(bad)
+		if ok {
+			t.Fatal("ok=true, want false for malformed quoted literal")
+		}
+	})
+}
+
+// TestWithDefaults pins the merge: zero-value TargetDirs inherits
+// the package defaults; a non-zero list stands.
+func TestWithDefaults(t *testing.T) {
+	t.Parallel()
+
+	got := withDefaults(Config{})
+	if len(got.TargetDirs) == 0 {
+		t.Fatal("TargetDirs empty after withDefaults; want default list")
+	}
+
+	custom := Config{TargetDirs: []string{"foo"}}
+	if got := withDefaults(custom); len(got.TargetDirs) != 1 || got.TargetDirs[0] != "foo" {
+		t.Fatalf("TargetDirs = %+v, want [foo]", got.TargetDirs)
+	}
+}
 
 // TestRun pins the contract of [Run]: errors.New literals must
 // start with the file's package name (optionally `<pkg>.<sub>:`);

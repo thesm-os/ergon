@@ -4,10 +4,65 @@
 package commitmsg
 
 import (
+	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestRun pins the script-style entry point: reads the file at
+// path, runs [Validate], and surfaces success / failure on the
+// matching writer.
+func TestRun(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid message writes OK to stdout", func(t *testing.T) {
+		t.Parallel()
+		path := writeTempMsg(t, "feat: add flag\n")
+		var stdout, stderr bytes.Buffer
+		if err := Run(&stdout, &stderr, path, Defaults()); err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "OK") {
+			t.Fatalf("stdout = %q, want it to contain OK", stdout.String())
+		}
+	})
+
+	t.Run("invalid message writes the diagnostic to stderr", func(t *testing.T) {
+		t.Parallel()
+		path := writeTempMsg(t, "no colon here\n")
+		var stdout, stderr bytes.Buffer
+		err := Run(&stdout, &stderr, path, Defaults())
+		if !errors.Is(err, ErrInvalidFormat) {
+			t.Fatalf("Run err = %v, want ErrInvalidFormat", err)
+		}
+		if !strings.Contains(stderr.String(), "commit-msg") {
+			t.Fatalf("stderr = %q, want it to mention commit-msg", stderr.String())
+		}
+	})
+
+	t.Run("missing file surfaces a wrapped read error", func(t *testing.T) {
+		t.Parallel()
+		var stdout, stderr bytes.Buffer
+		err := Run(&stdout, &stderr, filepath.Join(t.TempDir(), "nope"), Defaults())
+		if err == nil {
+			t.Fatal("Run err = nil for missing file, want non-nil")
+		}
+	})
+}
+
+// writeTempMsg writes body to a temp COMMIT_EDITMSG file and
+// returns the path.
+func writeTempMsg(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	return path
+}
 
 // TestValidate pins the contract of [Validate]: accepts the
 // standard Conventional Commits shape, rejects each documented

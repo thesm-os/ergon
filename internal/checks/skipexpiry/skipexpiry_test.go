@@ -5,12 +5,54 @@ package skipexpiry
 
 import (
 	"bytes"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestStringLiteral pins the literal extractor's three failure
+// modes alongside the happy path.
+func TestStringLiteral(t *testing.T) {
+	t.Parallel()
+
+	t.Run("quoted string decodes", func(t *testing.T) {
+		t.Parallel()
+		expr, _ := parser.ParseExpr(`"hello"`)
+		got, ok := stringLiteral(expr)
+		if !ok || got != "hello" {
+			t.Fatalf("got %q ok=%v, want hello/true", got, ok)
+		}
+	})
+
+	t.Run("integer literal rejected", func(t *testing.T) {
+		t.Parallel()
+		expr, _ := parser.ParseExpr(`42`)
+		if _, ok := stringLiteral(expr); ok {
+			t.Fatal("ok=true, want false")
+		}
+	})
+
+	t.Run("identifier rejected", func(t *testing.T) {
+		t.Parallel()
+		expr, _ := parser.ParseExpr(`foo`)
+		if _, ok := stringLiteral(expr); ok {
+			t.Fatal("ok=true, want false")
+		}
+	})
+
+	t.Run("malformed quoted literal rejected", func(t *testing.T) {
+		t.Parallel()
+		bad := &ast.BasicLit{Kind: token.STRING, Value: `"\xZZ"`}
+		if _, ok := stringLiteral(bad); ok {
+			t.Fatal("ok=true, want false")
+		}
+	})
+}
 
 // TestRun pins the contract of [Run]: scans the supplied list of
 // repo-relative paths for `_test.go` files, reports expired

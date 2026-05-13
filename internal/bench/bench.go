@@ -23,6 +23,12 @@ import (
 // run because the pinned baseline file does not exist.
 var ErrBaselineMissing = errors.New("bench: baseline file missing")
 
+// allPackages is the go-command pattern that names every package
+// at and below the working directory. Kept as a constant because
+// it appears in several call sites and benchmarks for it cannot
+// substitute a different value.
+const allPackages = "./..."
+
 // Baseline runs `go test -bench=. -run=^$ -benchmem -count=N` per
 // module, captures the output, and writes it to cfg.BaselinePath
 // in the benchstat-compatible text format. When no `Benchmark`
@@ -179,7 +185,7 @@ func runBench(
 			"-benchmem",
 			"-count=" + strconv.Itoa(testCfg.BenchCount),
 			"-timeout=" + testCfg.Timeout.String(),
-			"./...",
+			allPackages,
 		}
 		err := xexec.RunAllowNoPackages(ctx, runner,
 			xexec.Options{Dir: cwd, Stdout: sink, Stderr: stderr},

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
+	"go.thesmos.sh/ergon/internal/style"
 )
 
 // TestParseFuncLog pins the parser against representative
@@ -89,6 +90,13 @@ func TestSplitProfileHead(t *testing.T) {
 	path, span, ok := splitProfileHead("pkg/foo.go:12.5,18.13")
 	if !ok || path != "pkg/foo.go" || span != "12.5,18.13" {
 		t.Fatalf("split = (%q, %q, %v), want (pkg/foo.go, 12.5,18.13, true)", path, span, ok)
+	}
+
+	if _, _, ok := splitProfileHead("no-colon-here"); ok {
+		t.Fatal("ok=true for colon-less input, want false")
+	}
+	if _, _, ok := splitProfileHead(":leading"); ok {
+		t.Fatal("ok=true for leading colon, want false")
 	}
 }
 
@@ -300,6 +308,173 @@ func (*fakeCovRunner) LookPath(name string) (string, error) {
 	return "/usr/local/bin/" + name, nil
 }
 
+// TestDefaults pins the [Config] defaults: empty Packages so the
+// check short-circuits with a notice until thresholds are
+// declared, and TopN=10 for the failing-function list.
+func TestDefaults(t *testing.T) {
+	t.Parallel()
+
+	got := Defaults()
+	if len(got.Packages) != 0 {
+		t.Fatalf("Defaults().Packages = %+v, want empty", got.Packages)
+	}
+	if got.TopN != 10 {
+		t.Fatalf("Defaults().TopN = %d, want 10", got.TopN)
+	}
+}
+
+// TestWithDefaults pins the per-call merge: a Config with zero
+// TopN inherits [Defaults]'s TopN; a non-zero TopN is preserved.
+func TestWithDefaults(t *testing.T) {
+	t.Parallel()
+
+	if got := withDefaults(Config{}).TopN; got != 10 {
+		t.Fatalf("zero TopN merged = %d, want 10", got)
+	}
+	if got := withDefaults(Config{TopN: 5}).TopN; got != 5 {
+		t.Fatalf("non-zero TopN merged = %d, want 5", got)
+	}
+}
+
+// TestUniqueFiles pins the path-dedup helper used by the verbose
+// uncovered-ranges block: first-occurrence order is preserved
+// and duplicate paths are dropped.
+func TestUniqueFiles(t *testing.T) {
+	t.Parallel()
+
+	in := []Failure{
+		{Path: "a.go"}, {Path: "b.go"}, {Path: "a.go"}, {Path: "c.go"},
+	}
+	got := uniqueFiles(in)
+	want := []string{"a.go", "b.go", "c.go"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("uniqueFiles = %+v, want %+v", got, want)
+	}
+}
+
+// TestWriteUncoveredRanges pins the verbose-mode renderer: for
+// every failing-file's `count=0` block in the merged profile,
+// one indented `file:start-end (stmts)` line surfaces.
+func TestWriteUncoveredRanges(t *testing.T) {
+	t.Parallel()
+
+	merged := strings.Join([]string{
+		"mode: atomic",
+		"go.example.com/x/a.go:5.1,9.2 2 0",
+		"go.example.com/x/b.go:1.1,3.2 1 0",
+	}, "\n")
+	failures := []Failure{{Path: "a.go"}}
+	var buf strings.Builder
+	writeUncoveredRanges(&buf, style.Style{}, failures, "go.example.com/x/", merged)
+	out := buf.String()
+	if !strings.Contains(out, "Uncovered ranges") {
+		t.Fatalf("output missing header: %q", out)
+	}
+	if !strings.Contains(out, "a.go:5-9") {
+		t.Fatalf("output missing a.go range: %q", out)
+	}
+	if strings.Contains(out, "b.go") {
+		t.Fatalf("b.go leaked into the failing-file-only block: %q", out)
+	}
+}
+
+// TestRenderTarget exercises the per-target classifier: a row
+// matching the layer prefix below the threshold surfaces as a
+// failure; an excluded row counts under "excluded"; a skipped
+// row counts under "skipped"; a passing row counts toward
+// "passing". Returns true when at least one failure surfaces.
+func TestRenderTarget(t *testing.T) {
+	t.Parallel()
+
+	layer := Layer{Path: "internal/...", Line: 80}
+	rows := []funcRow{
+		{Path: "go.example.com/x/internal/a.go", Func: "Pass", Pct: 100},
+		{Path: "go.example.com/x/internal/b.go", Func: "Fail", Pct: 50},
+		{Path: "go.example.com/x/cmd/c.go", Func: "Outside", Pct: 0},
+	}
+	var buf strings.Builder
+	failed := renderTarget(&buf, style.Style{}, layer, rows, nil, nil,
+		"go.example.com/x/", 10, false, "")
+	if !failed {
+		t.Fatal("renderTarget returned false, want true (one row below threshold)")
+	}
+	out := buf.String()
+	for _, want := range []string{"internal", "Fail", "FAIL"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "Outside") {
+		t.Fatalf("function outside the layer prefix leaked into output: %q", out)
+	}
+}
+
+// TestRun exercises the top-level orchestrator path: given a
+// synthetic coverprofile and a fake runner that returns a
+// matching funcLog, the function emits per-target sections and
+// returns nil when every gated function passes.
+func TestRun(t *testing.T) {
+	t.Parallel()
+
+	t.Run("passing run returns nil and renders the final verdict", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		profile := "mode: atomic\ngo.example.com/x/internal/a.go:1.1,2.2 1 5\n"
+		if err := os.WriteFile(filepath.Join(dir, "root.out"), []byte(profile), 0o600); err != nil {
+			t.Fatalf("write profile: %v", err)
+		}
+		runner := &fakeCovRunner{
+			funcLog: "go.example.com/x/internal/a.go:1:\tA\t100.0%\n",
+		}
+		cfg := Config{Packages: []Layer{{Path: "internal/...", Line: 70}}}
+		var stdout strings.Builder
+		err := Run(t.Context(), runner, &stdout, io.Discard,
+			"", dir, "go.example.com/x/", cfg, nil, nil, RunOptions{})
+		if err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "every gated function") {
+			t.Fatalf("output missing pass verdict: %q", stdout.String())
+		}
+	})
+
+	t.Run("function below threshold surfaces as a failure", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		profile := "mode: atomic\ngo.example.com/x/internal/a.go:5.1,9.2 2 0\n"
+		if err := os.WriteFile(filepath.Join(dir, "root.out"), []byte(profile), 0o600); err != nil {
+			t.Fatalf("write profile: %v", err)
+		}
+		runner := &fakeCovRunner{
+			funcLog: "go.example.com/x/internal/a.go:1:\tA\t0.0%\n",
+		}
+		cfg := Config{Packages: []Layer{{Path: "internal/...", Line: 70}}}
+		err := Run(t.Context(), runner, io.Discard, io.Discard,
+			"", dir, "go.example.com/x/", cfg, nil, nil, RunOptions{})
+		if err == nil {
+			t.Fatal("Run returned nil, want failure")
+		}
+	})
+
+	t.Run("empty packages short-circuits with a skip notice", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "root.out"), []byte("mode: atomic\n"), 0o600); err != nil {
+			t.Fatalf("write profile: %v", err)
+		}
+		runner := &fakeCovRunner{}
+		var stdout strings.Builder
+		err := Run(t.Context(), runner, &stdout, io.Discard,
+			"", dir, "", Config{}, nil, nil, RunOptions{})
+		if err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "skipped") {
+			t.Fatalf("stdout missing skip notice: %q", stdout.String())
+		}
+	})
+}
+
 // TestStripFileLocation pins the `go tool cover -func` path
 // normaliser: the trailing `:<line>:` is removed.
 func TestStripFileLocation(t *testing.T) {
@@ -308,6 +483,59 @@ func TestStripFileLocation(t *testing.T) {
 	if got := stripFileLocation("pkg/foo.go:12:"); got != "pkg/foo.go" {
 		t.Errorf("stripFileLocation = %q, want pkg/foo.go", got)
 	}
+	if got := stripFileLocation("no-colon"); got != "no-colon" {
+		t.Errorf("stripFileLocation no-colon = %q, want no-colon (input returned)", got)
+	}
+	if got := stripFileLocation("foo:bar"); got != "foo" {
+		t.Errorf("stripFileLocation foo:bar = %q, want foo", got)
+	}
+}
+
+// TestStripPathToLayerPrefix pins the directory-prefix extractor
+// used to compare a cover-output file path against the configured
+// layer paths.
+func TestStripPathToLayerPrefix(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct{ in, want string }{
+		{"internal/foo/bar.go", "internal/foo"},
+		{"foo.go", "foo.go"},
+		{"a/b/c/d.go", "a/b/c"},
+	}
+	for _, tc := range cases {
+		if got := stripPathToLayerPrefix(tc.in); got != tc.want {
+			t.Errorf("stripPathToLayerPrefix(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestSplitFuncCoverHead pins the `<path>:<line>:` token parser
+// `parseFuncLog` uses: succeeds on canonical tokens, returns
+// ok=false on inputs without a parseable line number.
+func TestSplitFuncCoverHead(t *testing.T) {
+	t.Parallel()
+
+	t.Run("canonical token parses", func(t *testing.T) {
+		t.Parallel()
+		path, line, ok := splitFuncCoverHead("pkg/foo.go:12:")
+		if !ok || path != "pkg/foo.go" || line != 12 {
+			t.Fatalf("split = (%q, %d, %v), want (pkg/foo.go, 12, true)", path, line, ok)
+		}
+	})
+
+	t.Run("token without line number rejected", func(t *testing.T) {
+		t.Parallel()
+		if _, _, ok := splitFuncCoverHead("no-colon-here"); ok {
+			t.Fatal("ok=true, want false")
+		}
+	})
+
+	t.Run("non-integer line number rejected", func(t *testing.T) {
+		t.Parallel()
+		if _, _, ok := splitFuncCoverHead("pkg/foo.go:abc:"); ok {
+			t.Fatal("ok=true, want false")
+		}
+	})
 }
 
 // extractPaths is a tiny helper that pulls the Path field from a
