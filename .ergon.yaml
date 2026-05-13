@@ -123,12 +123,16 @@ checks:
   # only exercises against broken implementations.
   skips: []
 
-  # coverage — `ergon check coverage`
+  # coverage — `ergon check coverage` + `ergon check branch`
   #
-  # Per-package thresholds rather than one global number — different
-  # layers have different testability ceilings. `branch` and
-  # `require_branch` are reserved for the future gobco-backed gate;
-  # `go test -cover` only reports statement coverage today.
+  # Per-layer thresholds rather than one global number — different
+  # layers have different testability ceilings. Longest-prefix wins.
+  # `line` is the aggregate statement-coverage threshold the gate
+  # enforces (`go test -cover` semantics). `branch` is the
+  # condition-coverage threshold gobco enforces; `require_branch:
+  # true` joins the branch gate to the `ergon check` umbrella, while
+  # `false` keeps it informational (run `ergon check branch`
+  # explicitly to see the number).
   coverage:
     packages:
       - path: internal/checks/...

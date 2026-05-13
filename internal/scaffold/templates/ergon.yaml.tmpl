@@ -130,14 +130,27 @@ checks:
   #       func_glob: "Run*Suite"
   #       file_glob: "*test/*"
 
-  # coverage — `ergon check coverage`
+  # coverage — `ergon check coverage` + `ergon check branch`
   #
-  # Per-package thresholds rather than one global number — different
+  # Per-layer thresholds rather than one global number — different
   # layers have different testability ceilings. Longest-prefix wins:
   # a function under both `internal/...` and `internal/checks/...`
-  # is gated by the latter. `branch` and `require_branch` are
-  # reserved for the future gobco-backed gate; `go test -cover`
-  # only reports statement coverage today.
+  # is gated by the latter (specificity-wins).
+  #
+  # `line` enforces statement coverage (`go test -cover`). The
+  # per-layer verdict compares the aggregate "X% of statements
+  # covered" against this threshold; individual sub-threshold
+  # functions surface as a diagnostic list, not as failures.
+  #
+  # `branch` enforces condition coverage (gobco). When
+  # `require_branch: true` AND the layer's aggregate branch
+  # coverage is below `branch`, the gate fails. When
+  # `require_branch: false` the number is informational only —
+  # rendered without failing. The branch gate is heavy (gobco
+  # rebuilds each package under test) so it joins the `ergon
+  # check` umbrella only when at least one layer opts in via
+  # `require_branch: true`; otherwise run `ergon check branch`
+  # standalone.
   coverage:
     # Per-layer thresholds. Empty disables the check —
     # `ergon check coverage` short-circuits with a notice.
