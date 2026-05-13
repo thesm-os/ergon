@@ -93,6 +93,29 @@ changelog:
       - 'Merge pull request'
       - 'Merge branch'
 
+homebrew_casks:
+  - name: ergon
+    # CLI binary inside the cask — goreleaser unpacks the archive
+    # and links binaries[0] into Homebrew's bin/.
+    binaries:
+      - ergon
+    homepage: 'https://github.com/thesm-os/ergon'
+    description: 'Task runner for Go projects: bootstrap, format, lint, test, bench, release, and a multi-stage check umbrella.'
+    # Tap repo lives at github.com/thesm-os/homebrew-tap.
+    # Cross-repo writes need a PAT with contents:write on the tap;
+    # the release workflow exposes it as $HOMEBREW_TAP_TOKEN.
+    repository:
+      owner: thesm-os
+      name: homebrew-tap
+      branch: main
+      token: '{{ .Env.HOMEBREW_TAP_TOKEN }}'
+    commit_author:
+      name: goreleaser-bot
+      email: bot@thesmos.sh
+    commit_msg_template: 'brew: bump {{ .ProjectName }} to {{ .Tag }}'
+    # Skip prereleases (anything with a `-` suffix, e.g. v1.0.0-rc1).
+    skip_upload: auto
+
 release:
   github:
     owner: thesm-os
