@@ -16,9 +16,9 @@ var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap",
 	Short: "Install development tools",
 	Long: "Install the Go tools ergon shells out to: gofumpt, gci, " +
-		"golangci-lint, govulncheck, go-license, benchstat. Also " +
-		"checks for markdownlint-cli2 and tries to install it via npm " +
-		"when missing.",
+		"golangci-lint, govulncheck, go-license, benchstat, gremlins. " +
+		"Also checks for markdownlint-cli2 and tries to install it via " +
+		"npm when missing.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return bootstrap.Run(

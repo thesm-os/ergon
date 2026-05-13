@@ -19,11 +19,12 @@ import (
 const VersionLatest = "latest"
 
 // DefaultTools is the built-in tool list [Run] installs before
-// processing any per-repo extras. Membership reflects the union of
-// what the ecosystem's Makefile templates install today: gofumpt
-// and gci handle formatting, golangci-lint is the umbrella linter,
-// govulncheck powers `ergon check vuln`, go-license applies SPDX
-// headers, and benchstat backs `ergon bench regression`.
+// processing any per-repo extras. Membership covers every binary
+// ergon shells out to: gofumpt and gci handle formatting,
+// golangci-lint is the umbrella linter, govulncheck powers
+// `ergon check vuln`, go-license applies SPDX headers, benchstat
+// backs `ergon bench regression`, and gremlins backs
+// `ergon check mutation`.
 var DefaultTools = []ToolSpec{
 	{Pkg: "mvdan.cc/gofumpt", Version: VersionLatest},
 	{Pkg: "github.com/daixiang0/gci", Version: VersionLatest},
@@ -31,6 +32,7 @@ var DefaultTools = []ToolSpec{
 	{Pkg: "golang.org/x/vuln/cmd/govulncheck", Version: VersionLatest},
 	{Pkg: "github.com/palantir/go-license", Version: VersionLatest},
 	{Pkg: "golang.org/x/perf/cmd/benchstat", Version: VersionLatest},
+	{Pkg: "github.com/go-gremlins/gremlins/cmd/gremlins", Version: VersionLatest},
 }
 
 // markdownlintHint is surfaced when neither markdownlint-cli2 nor
