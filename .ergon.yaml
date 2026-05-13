@@ -49,3 +49,18 @@ markdown:
     - "#vendor"
     - "#dist"
     - "#node_modules"
+
+# test — `ergon test` and its subcommands (race, bench, fuzz, coverage)
+test:
+  # Parallelism `go test -cpu=N` exposes to each package.
+  cpu: 4
+  # Iteration count for the default `go test` run.
+  count: 3
+  # Per-package deadline applied to every test mode.
+  timeout: 10m
+  # Iteration count for `ergon test race`.
+  race_count: 3
+  # Sample count for `ergon bench baseline` / `regression`.
+  bench_count: 6
+  # Per-target wall-clock budget for `ergon test fuzz`.
+  fuzz_time: 30s
