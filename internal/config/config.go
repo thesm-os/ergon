@@ -23,13 +23,21 @@ import (
 //
 // Fields left empty after [Load] returns remain candidates for
 // runtime discovery — an empty [Config.Name] gets filled with the
-// basename of the repository root, for example.
+// basename of the repository root, an empty [Config.Modules] gets
+// populated from `go.work`, etc.
 type Config struct {
 	// Name identifies the project. Drives the directory under
 	// which ergon writes coverage and build artifacts (`.ergon/`,
 	// `.eidos/`, ...) and appears in help banners. Defaults at
 	// runtime to the basename of the repository root.
 	Name string `mapstructure:"name"`
+
+	// Modules optionally fixes the module set ergon iterates,
+	// bypassing `go.work` discovery. Paths are relative to the
+	// repository root; `.` denotes the root module. When empty,
+	// discovery reads `go.work` (or falls back to a single root
+	// entry).
+	Modules []string `mapstructure:"modules"`
 
 	// Bootstrap configures `ergon bootstrap`. See
 	// [bootstrap.Config] for field semantics.
