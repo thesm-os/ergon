@@ -5,27 +5,24 @@ package errorprefix
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
+	"strconv"
 	"strings"
 )
 
-// packagePattern matches the Go `package <name>` declaration.
-var packagePattern = regexp.MustCompile(`^package\s+(\w+)`)
-
-// errorsNewPattern matches a call to `errors.New("...")` capturing
-// the literal string. Only double-quoted strings are recognised;
-// the codebase convention does not use backtick literals for
-// sentinel messages.
-var errorsNewPattern = regexp.MustCompile(`errors\.New\("([^"]+)"\)`)
-
 // Run scans every non-test `.go` file in files for `errors.New`
-// literals and reports those whose prefix does not match the
-// file's package name (optionally `<pkg>.<sub>:` for nested
-// scopes). files is a slice of repo-relative paths; root is the
-// absolute repository root used to resolve each file on disk.
+// call sites and reports those whose literal does not start with
+// the file's package name (optionally `<pkg>.<sub>:` for nested
+// scopes). Detection is AST-based — literal `errors.New("...")`
+// strings inside comments or other code do not register.
+//
+// files is a slice of repo-relative paths; root is the absolute
+// repository root used to resolve each file on disk.
 //
 // cfg.TargetDirs narrows the scan to repo-relative prefix(es) —
 // useful when the rule applies only to the library layers, not
@@ -44,9 +41,12 @@ func Run(stdout, stderr io.Writer, root string, files []string, cfg Config) erro
 		}
 		body, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
-			return fmt.Errorf("read %s: %w", rel, err)
+			return fmt.Errorf("errorprefix: read %s: %w", rel, err)
 		}
-		f, count := scanFile(rel, string(body))
+		f, count, err := scanFile(rel, body)
+		if err != nil {
+			return err
+		}
 		scanned += count
 		violations = append(violations, f...)
 	}
@@ -56,7 +56,7 @@ func Run(stdout, stderr io.Writer, root string, files []string, cfg Config) erro
 			fmt.Fprintf(stderr, "%s:%d: errors.New(%q) — expected prefix %q\n",
 				v.Path, v.Line, v.Literal, v.Pkg+": ")
 		}
-		return fmt.Errorf("%d errors.New call(s) with wrong package prefix", len(violations))
+		return fmt.Errorf("errorprefix: %d errors.New call(s) with wrong package prefix", len(violations))
 	}
 	if scanned == 0 {
 		fmt.Fprintln(stdout, "no errors.New calls found")
@@ -98,45 +98,82 @@ type finding struct {
 	Pkg     string
 }
 
-// scanFile returns every prefix violation in body plus the total
-// number of `errors.New` calls inspected. Lines are 1-indexed.
-// Files that do not declare a package (or declare an empty name)
-// produce no findings.
-func scanFile(path, body string) ([]finding, int) {
-	pkg := packageOf(body)
-	if pkg == "" {
-		return nil, 0
+// scanFile parses body as a Go source file and returns every
+// `errors.New("...")` call site whose literal does not start with
+// the file's package name. Files that fail to parse surface the
+// parser error verbatim.
+func scanFile(path string, body []byte) ([]finding, int, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, body, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, 0, fmt.Errorf("errorprefix: parse %s: %w", path, err)
 	}
+	pkg := f.Name.Name
+	if pkg == "" {
+		return nil, 0, nil
+	}
+
 	var out []finding
 	var scanned int
-	lineNo := 0
-	for line := range strings.SplitSeq(body, "\n") {
-		lineNo++
-		match := errorsNewPattern.FindStringSubmatch(line)
-		if match == nil {
-			continue
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if !isErrorsNew(call.Fun) {
+			return true
+		}
+		if len(call.Args) == 0 {
+			return true
+		}
+		msg, ok := stringLiteral(call.Args[0])
+		if !ok {
+			return true
 		}
 		scanned++
-		literal := match[1]
-		if !hasPrefix(literal, pkg) {
-			out = append(out, finding{Path: path, Line: lineNo, Literal: literal, Pkg: pkg})
+		if !hasPrefix(msg, pkg) {
+			out = append(out, finding{
+				Path:    path,
+				Line:    fset.Position(call.Pos()).Line,
+				Literal: msg,
+				Pkg:     pkg,
+			})
 		}
-	}
-	return out, scanned
+		return true
+	})
+	return out, scanned, nil
 }
 
-// packageOf extracts the first `package <name>` declaration in
-// body. Returns the empty string when the source does not contain
-// a recognisable declaration.
-func packageOf(body string) string {
-	for line := range strings.SplitSeq(body, "\n") {
-		line = strings.TrimSpace(line)
-		match := packagePattern.FindStringSubmatch(line)
-		if match != nil {
-			return match[1]
-		}
+// isErrorsNew reports whether expr resolves to a call of
+// `errors.New`. The check is syntactic — any selector with
+// `errors` as the package qualifier and `New` as the method name
+// counts. Aliased imports (`stderrors "errors"`) are not
+// recognised; the repository convention is the canonical name.
+func isErrorsNew(expr ast.Expr) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return false
 	}
-	return ""
+	ident, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	return ident.Name == "errors" && sel.Sel.Name == "New"
+}
+
+// stringLiteral returns the unquoted contents of expr when it is
+// a Go string literal, plus a boolean reporting whether the
+// extraction succeeded.
+func stringLiteral(expr ast.Expr) (string, bool) {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	s, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return "", false
+	}
+	return s, true
 }
 
 // hasPrefix reports whether literal starts with an acceptable

@@ -62,7 +62,7 @@ func (b BumpLevel) String() string {
 // ErrInvalidBumpLevel reports that a textual level isn't recognised.
 // Returned by [ParseBumpLevel]; surfaced through ErrUsage at the
 // CLI boundary.
-var ErrInvalidBumpLevel = errors.New("invalid bump level")
+var ErrInvalidBumpLevel = errors.New("release: invalid bump level")
 
 // ParseBumpLevel returns the [BumpLevel] matching the lowercased
 // identifier in s. Returns [ErrInvalidBumpLevel] for any other input.
@@ -84,7 +84,7 @@ func ParseBumpLevel(s string) (BumpLevel, error) {
 // ErrInvalidSemver reports that a version string doesn't match the
 // `X.Y.Z` triplet form the binary supports. Pre-release / build
 // metadata suffixes are not handled today.
-var ErrInvalidSemver = errors.New("invalid semver")
+var ErrInvalidSemver = errors.New("release: invalid semver")
 
 // semverRegex matches the bare three-segment numeric form.
 var semverRegex = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)$`)

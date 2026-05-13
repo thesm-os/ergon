@@ -16,7 +16,7 @@ import (
 // distinguish a malformed `.ergon.yaml` (caller bug) from a viper
 // read failure (filesystem / encoding issue) without inspecting
 // error strings.
-var ErrUnknownField = errors.New("unknown field in .ergon.yaml")
+var ErrUnknownField = errors.New("config: unknown field in .ergon.yaml")
 
 // Load reads `.ergon.yaml` from the repository root (or from the
 // explicit path when non-empty) and layers its contents over

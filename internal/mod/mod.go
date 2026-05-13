@@ -22,7 +22,7 @@ import (
 // ErrDirty signals that one or more modules' go.mod or go.sum
 // changed after `go mod tidy`. The error message names every
 // dirty module so the caller can fix them in one pass.
-var ErrDirty = errors.New("uncommitted go.mod/go.sum changes after `go mod tidy`")
+var ErrDirty = errors.New("mod: uncommitted go.mod/go.sum changes after `go mod tidy`")
 
 // Install runs `go mod download` followed by `go mod verify` in
 // each module. The pair mirrors what `make install` did in the

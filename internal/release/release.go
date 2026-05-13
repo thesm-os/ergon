@@ -51,7 +51,7 @@ func Run(
 	root string, mods []modules.Module, opts Options,
 ) error {
 	if len(mods) == 0 {
-		return errors.New("no modules to release")
+		return errors.New("release: no modules to release")
 	}
 	plan, err := BuildPlan(ctx, runner, root, mods, opts)
 	if err != nil {

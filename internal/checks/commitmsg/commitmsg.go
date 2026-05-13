@@ -21,19 +21,19 @@ var subjectPattern = regexp.MustCompile(`^(\w+)(\([^)]+\))?:\s+(.+)$`)
 
 // ErrInvalidFormat reports that the subject does not match the
 // Conventional Commits `<type>(<scope>?): <description>` shape.
-var ErrInvalidFormat = errors.New("subject does not match Conventional Commits format")
+var ErrInvalidFormat = errors.New("commitmsg: subject does not match Conventional Commits format")
 
 // ErrUnknownType reports that the subject's type is not in the
 // configured [Config.Types] set.
-var ErrUnknownType = errors.New("unknown commit type")
+var ErrUnknownType = errors.New("commitmsg: unknown commit type")
 
 // ErrSubjectTooLong reports that the subject exceeds the
 // configured [Config.MaxSubjectLength].
-var ErrSubjectTooLong = errors.New("subject exceeds maximum length")
+var ErrSubjectTooLong = errors.New("commitmsg: subject exceeds maximum length")
 
 // ErrTrailingPeriod reports that the subject ends with `.`, which
 // the convention disallows.
-var ErrTrailingPeriod = errors.New("subject must not end with a period")
+var ErrTrailingPeriod = errors.New("commitmsg: subject must not end with a period")
 
 // Run reads the commit message from path and validates its first
 // line against cfg. Wraps [Validate] for the script-style entry

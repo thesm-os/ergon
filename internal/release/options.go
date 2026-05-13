@@ -13,7 +13,7 @@ import (
 // conflicting combination, or a missing required flag. The cobra
 // layer surfaces it to the user; ergon's `main` does not special-case
 // it for an exit code today.
-var ErrUsage = errors.New("usage")
+var ErrUsage = errors.New("release: usage")
 
 // Options carries the per-invocation choices `ergon release` reads
 // from cobra flags. The struct is constructed from raw flag values

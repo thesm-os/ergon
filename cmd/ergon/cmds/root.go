@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.thesmos.sh/ergon/internal/config"
+	"go.thesmos.sh/ergon/internal/version"
 )
 
 // rootCmd is the top-level `ergon` command. Subcommand files
@@ -28,6 +29,7 @@ var rootCmd = &cobra.Command{
 		"test, benchmark, release. It reads `go.work` (or walks for " +
 		"`go.mod` files) and runs each task against the discovered " +
 		"module set.",
+	Version:      version.Full(),
 	SilenceUsage: true,
 	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
 		loaded, err := config.Load(cfgPath)
