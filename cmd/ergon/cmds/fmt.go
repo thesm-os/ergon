@@ -33,7 +33,7 @@ var fmtCmd = &cobra.Command{
 		return format.Run(cmd.Context(), xexec.Command{},
 			cmd.OutOrStdout(), cmd.ErrOrStderr(),
 			format.Inputs{Root: root, ImportPath: importPath, Modules: mods},
-			cfg.Format, cfg.License,
+			cfg.License, cfg.Markdown,
 		)
 	},
 }

@@ -37,13 +37,14 @@ license:
     - "*.gen.go"
     - "*.gen_test.go"
 
-# format — `ergon fmt`
-format:
+# markdown — markdownlint-cli2 invocation shared by `ergon fmt`
+# (auto-fix mode) and `ergon lint md` (reporting only)
+markdown:
   # Argument list handed to markdownlint-cli2. Glob patterns select
-  # files; entries prefixed with `#` exclude paths. Markdown lint
-  # is best-effort during fmt — a missing markdownlint-cli2 binary
-  # surfaces as a warning and the rest of the fmt run proceeds.
-  markdown_globs:
+  # files; entries prefixed with `#` exclude paths. A missing
+  # markdownlint-cli2 binary surfaces as a warning naming
+  # `ergon bootstrap`; the rest of the run proceeds.
+  globs:
     - "**/*.md"
     - "#vendor"
     - "#dist"
