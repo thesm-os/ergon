@@ -9,7 +9,6 @@ package scaffold
 
 import (
 	"embed"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -38,15 +37,14 @@ type Vars struct {
 	Module string
 }
 
-// ErrTargetExists reports that a destination file already exists
-// and would be overwritten. Run with --force to opt in.
-var ErrTargetExists = errors.New("scaffold: destination file exists")
-
 // Run renders every template under [templatesFS] into dest. Each
 // template's filename loses the `.tmpl` suffix; directory
-// structure is preserved. When force is false an existing target
-// file causes [ErrTargetExists]; when true the file is
-// overwritten.
+// structure is preserved.
+//
+// Existing destination files are skipped (with a `skipped` notice
+// on stdout) so re-running `ergon init` in a partially-initialised
+// repository fills in only the gaps. Pass force=true to overwrite
+// every target unconditionally.
 func Run(stdout io.Writer, dest string, vars Vars, force bool) error {
 	return fs.WalkDir(templatesFS, "templates", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -83,7 +81,8 @@ func Run(stdout io.Writer, dest string, vars Vars, force bool) error {
 
 		if !force {
 			if _, statErr := os.Stat(target); statErr == nil {
-				return fmt.Errorf("%w: %s", ErrTargetExists, rel)
+				fmt.Fprintf(stdout, "skipped %s (exists; pass --force to overwrite)\n", rel)
+				return nil
 			}
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {

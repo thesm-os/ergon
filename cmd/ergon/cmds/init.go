@@ -21,14 +21,17 @@ var initFlags struct {
 
 // initCmd is `ergon init`. Writes the starter file set (Makefile,
 // .ergon.yaml, .gitignore, README.md, .github/workflows/ci.yml)
-// into the current directory.
+// into the current directory. Existing files are skipped (with a
+// notice) unless `--force` is passed; re-running on a
+// partially-initialised tree fills in only the gaps.
 var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Scaffold a new ergon-driven repository",
 	Long: "Writes a Makefile, `.ergon.yaml`, `.gitignore`, README, and " +
 		"a starter `.github/workflows/ci.yml` into the current " +
-		"directory. Refuses to overwrite existing files unless --force " +
-		"is passed.",
+		"directory. Files that already exist are skipped with a notice " +
+		"so re-running fills in only the missing pieces; pass --force to " +
+		"overwrite every target.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		cwd, err := os.Getwd()
@@ -55,6 +58,6 @@ func init() {
 	initCmd.Flags().StringVar(&initFlags.module, "module", "",
 		"Go module path (reserved for future templates)")
 	initCmd.Flags().BoolVar(&initFlags.force, "force", false,
-		"Overwrite existing files")
+		"Overwrite existing files (default: skip with a notice)")
 	rootCmd.AddCommand(initCmd)
 }

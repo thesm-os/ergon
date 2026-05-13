@@ -4,7 +4,6 @@
 package scaffold
 
 import (
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -54,15 +53,28 @@ func TestRun(t *testing.T) {
 		}
 	})
 
-	t.Run("existing destination file is refused without force", func(t *testing.T) {
+	t.Run("existing destination file is skipped without force; siblings still write", func(t *testing.T) {
 		t.Parallel()
 		dest := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dest, "Makefile"), []byte("custom"), 0o600); err != nil {
 			t.Fatalf("seed Makefile: %v", err)
 		}
-		err := Run(io.Discard, dest, Vars{Name: "myproj"}, false)
-		if !errors.Is(err, ErrTargetExists) {
-			t.Fatalf("Run err = %v, want ErrTargetExists", err)
+		var stdout strings.Builder
+		if err := Run(&stdout, dest, Vars{Name: "myproj"}, false); err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		body, err := os.ReadFile(filepath.Join(dest, "Makefile"))
+		if err != nil {
+			t.Fatalf("read Makefile: %v", err)
+		}
+		if string(body) != "custom" {
+			t.Fatalf("Makefile overwritten without force: %q", string(body))
+		}
+		if _, err := os.Stat(filepath.Join(dest, ".ergon.yaml")); err != nil {
+			t.Fatalf("siblings did not write: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "skipped Makefile") {
+			t.Fatalf("stdout = %q, want skip notice for Makefile", stdout.String())
 		}
 	})
 
