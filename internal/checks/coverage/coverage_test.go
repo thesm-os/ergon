@@ -4,12 +4,15 @@
 package coverage
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	xexec "go.thesmos.sh/ergon/internal/exec"
 )
 
 // TestParseFuncLog pins the parser against representative
@@ -121,21 +124,23 @@ func TestCollectUncoveredBlocks(t *testing.T) {
 }
 
 // TestUncovered exercises the top-level command path against a
-// tempdir of synthetic profiles. Asserts the section header and
-// per-file blocks render in the captured stdout.
+// tempdir of synthetic profiles. Uses a fakeRunner that returns
+// a canonical `go tool cover -func` output so the function-
+// indexing path is hit without a real subprocess.
 func TestUncovered(t *testing.T) {
 	t.Parallel()
 
 	t.Run("empty coverage dir surfaces an error", func(t *testing.T) {
 		t.Parallel()
 		dir := filepath.Join(t.TempDir(), "missing")
-		err := Uncovered(t.Context(), nil, io.Discard, io.Discard, "", dir, "")
+		err := Uncovered(t.Context(), &fakeCovRunner{}, io.Discard, io.Discard,
+			"", dir, "", Config{}, nil, nil, UncoveredOptions{All: true})
 		if err == nil {
 			t.Fatal("Uncovered returned nil, want missing-profiles error")
 		}
 	})
 
-	t.Run("merged profiles render grouped by file", func(t *testing.T) {
+	t.Run("--all renders every uncovered block grouped by function", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		body := strings.Join([]string{
@@ -146,19 +151,61 @@ func TestUncovered(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "root.out"), []byte(body), 0o600); err != nil {
 			t.Fatalf("write: %v", err)
 		}
+		runner := &fakeCovRunner{
+			funcLog: "go.example.com/x/a.go:8:\tDoThing\t75.0%\n" +
+				"go.example.com/x/b.go:1:\tCovered\t100.0%\n",
+		}
 		var stdout strings.Builder
-		if err := Uncovered(t.Context(), nil, &stdout, io.Discard, "", dir, "go.example.com/x/"); err != nil {
+		err := Uncovered(t.Context(), runner, &stdout, io.Discard,
+			"", dir, "go.example.com/x/",
+			Config{}, nil, nil, UncoveredOptions{All: true})
+		if err != nil {
 			t.Fatalf("Uncovered err: %v", err)
 		}
 		out := stdout.String()
 		if !strings.Contains(out, "a.go") {
 			t.Fatalf("stdout missing a.go: %q", out)
 		}
+		if !strings.Contains(out, "DoThing") {
+			t.Fatalf("stdout missing containing function name: %q", out)
+		}
 		if strings.Contains(out, "b.go") {
 			t.Fatalf("stdout unexpectedly includes covered b.go: %q", out)
 		}
 		if !strings.Contains(out, "1 uncovered block") {
 			t.Fatalf("stdout missing aggregate: %q", out)
+		}
+	})
+
+	t.Run("default mode drops files outside the configured layers", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		body := strings.Join([]string{
+			"mode: atomic",
+			"go.example.com/x/internal/a.go:10.1,12.2 2 0",
+			"go.example.com/x/cmd/b.go:5.1,8.2 1 0",
+		}, "\n") + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "root.out"), []byte(body), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		runner := &fakeCovRunner{
+			funcLog: "go.example.com/x/internal/a.go:8:\tInternalFn\t75.0%\n" +
+				"go.example.com/x/cmd/b.go:5:\tCmdFn\t0.0%\n",
+		}
+		cfg := Config{Packages: []Layer{{Path: "internal/...", Line: 70}}}
+		var stdout strings.Builder
+		err := Uncovered(t.Context(), runner, &stdout, io.Discard,
+			"", dir, "go.example.com/x/",
+			cfg, nil, nil, UncoveredOptions{})
+		if err != nil {
+			t.Fatalf("Uncovered err: %v", err)
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "internal/a.go") {
+			t.Fatalf("internal/a.go missing under default filter: %q", out)
+		}
+		if strings.Contains(out, "cmd/b.go") {
+			t.Fatalf("cmd/b.go leaked past layer filter: %q", out)
 		}
 	})
 
@@ -169,14 +216,88 @@ func TestUncovered(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "root.out"), []byte(body), 0o600); err != nil {
 			t.Fatalf("write: %v", err)
 		}
+		runner := &fakeCovRunner{funcLog: "go.example.com/x/a.go:1:\tA\t100.0%\n"}
 		var stdout strings.Builder
-		if err := Uncovered(t.Context(), nil, &stdout, io.Discard, "", dir, "go.example.com/x/"); err != nil {
+		err := Uncovered(t.Context(), runner, &stdout, io.Discard,
+			"", dir, "go.example.com/x/",
+			Config{}, nil, nil, UncoveredOptions{All: true})
+		if err != nil {
 			t.Fatalf("Uncovered err: %v", err)
 		}
 		if !strings.Contains(stdout.String(), "no uncovered lines") {
 			t.Fatalf("stdout missing all-clear: %q", stdout.String())
 		}
 	})
+}
+
+// TestIndexFunctionsByFile pins the parser for
+// `go tool cover -func` output: per-file function lists are
+// sorted by start line, the `total:` row is dropped, and the
+// path is module-prefix-stripped.
+func TestIndexFunctionsByFile(t *testing.T) {
+	t.Parallel()
+
+	funcLog := strings.Join([]string{
+		"go.example.com/x/a.go:42:\tLater\t75.0%",
+		"go.example.com/x/a.go:10:\tEarlier\t50.0%",
+		"go.example.com/x/b.go:1:\tBeenAround\t100.0%",
+		"total:\t\t\t88.0%",
+	}, "\n")
+	got := indexFunctionsByFile(funcLog, "go.example.com/x/")
+	if len(got) != 2 {
+		t.Fatalf("files = %d, want 2", len(got))
+	}
+	a := got["a.go"]
+	want := []funcSpan{{StartLine: 10, Func: "Earlier"}, {StartLine: 42, Func: "Later"}}
+	if !slices.Equal(a, want) {
+		t.Errorf("a.go spans = %+v, want %+v", a, want)
+	}
+}
+
+// TestFunctionAt pins the lookup that maps a line to its
+// containing function: the latest span with StartLine ≤ line.
+func TestFunctionAt(t *testing.T) {
+	t.Parallel()
+
+	spans := []funcSpan{
+		{StartLine: 10, Func: "First"},
+		{StartLine: 30, Func: "Second"},
+		{StartLine: 60, Func: "Third"},
+	}
+	cases := []struct {
+		line int
+		want string
+	}{
+		{15, "First"},
+		{30, "Second"},
+		{55, "Second"},
+		{60, "Third"},
+		{1000, "Third"},
+		{5, ""},
+	}
+	for _, tc := range cases {
+		if got := functionAt(spans, tc.line); got != tc.want {
+			t.Errorf("functionAt(%d) = %q, want %q", tc.line, got, tc.want)
+		}
+	}
+}
+
+// fakeCovRunner satisfies [xexec.Runner] for the coverage tests
+// that exercise the `go tool cover -func` shell-out. funcLog is
+// returned verbatim via opts.Stdout; LookPath is unused.
+type fakeCovRunner struct {
+	funcLog string
+}
+
+func (f *fakeCovRunner) Run(_ context.Context, opts xexec.Options, _ string, _ ...string) error {
+	if opts.Stdout != nil && f.funcLog != "" {
+		_, _ = opts.Stdout.Write([]byte(f.funcLog))
+	}
+	return nil
+}
+
+func (*fakeCovRunner) LookPath(name string) (string, error) {
+	return "/usr/local/bin/" + name, nil
 }
 
 // TestStripFileLocation pins the `go tool cover -func` path

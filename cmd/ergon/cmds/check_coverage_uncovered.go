@@ -13,23 +13,29 @@ import (
 	xexec "go.thesmos.sh/ergon/internal/exec"
 )
 
+// checkCoverageUncoveredFlags captures the local flags on
+// `check coverage uncovered`. --all flips the report from
+// policy-filtered (the default) to "show every uncovered block".
+var checkCoverageUncoveredFlags struct {
+	all bool
+}
+
 // checkCoverageUncoveredCmd is `ergon check coverage uncovered`.
-// Lists every uncovered line range in the merged coverprofile,
-// regardless of `checks.coverage.packages`, `checks.excludes`,
-// or `checks.skips`. The gate command (`ergon check coverage`)
-// reports only the layers a project explicitly declares; this
-// subcommand surfaces every uncovered block across every package
-// the test suite touched, so contributors can see the full debt
-// when closing gaps.
+// Renders every uncovered block grouped by file → function. By
+// default the report respects the same policy the gate command
+// applies (layer membership + `checks.excludes` + `checks.skips`);
+// `--all` removes the filters so the full coverage debt surfaces.
 var checkCoverageUncoveredCmd = &cobra.Command{
 	Use:   "uncovered",
-	Short: "List every uncovered line across the whole tree",
-	Long: "Lists every count=0 block in the merged coverprofile, " +
-		"grouped by file. Ignores `checks.coverage.packages`, " +
-		"`checks.excludes`, and `checks.skips` — the report shows " +
-		"every uncovered region across every package `ergon test` " +
-		"touched, not just the configured threshold layers. Run " +
-		"`ergon test` first to produce the profiles.",
+	Short: "List every uncovered line, grouped by file → function",
+	Long: "Maps every count=0 block in the merged coverprofile to its " +
+		"containing function and prints the result grouped by file. " +
+		"By default the report respects the same policy the gate " +
+		"command applies: only functions under " +
+		"`checks.coverage.packages` layers, minus `checks.excludes` " +
+		"and `checks.skips`. Pass --all to disable the filters and " +
+		"show every uncovered block across every package " +
+		"`ergon test` touched.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		ctx := cmd.Context()
@@ -48,10 +54,15 @@ var checkCoverageUncoveredCmd = &cobra.Command{
 		coverageDir := filepath.Join(root, "."+name, "coverage")
 		return coverage.Uncovered(ctx, xexec.Command{},
 			cmd.OutOrStdout(), cmd.ErrOrStderr(),
-			root, coverageDir, importPath+"/")
+			root, coverageDir, importPath+"/",
+			cfg.Checks.Coverage, cfg.Checks.Excludes, cfg.Checks.Skips,
+			coverage.UncoveredOptions{All: checkCoverageUncoveredFlags.all})
 	},
 }
 
 func init() {
+	checkCoverageUncoveredCmd.Flags().BoolVar(
+		&checkCoverageUncoveredFlags.all, "all", false,
+		"Skip the policy filters and show every uncovered block")
 	checkCoverageCmd.AddCommand(checkCoverageUncoveredCmd)
 }
