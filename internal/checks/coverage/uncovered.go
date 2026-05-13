@@ -220,50 +220,34 @@ func stripPathToLayerPrefix(path string) string {
 	return path[:idx]
 }
 
-// collectUncoveredBlocks parses merged into a map keyed by
-// repo-relative file path. modulePrefix is stripped from every
-// path token so the keys match what the rest of ergon prints.
-// Blocks within each file are sorted by start line.
+// collectUncoveredBlocks deduplicates the merged coverprofile by
+// block location (sums execution counts across every appearance,
+// the same way `go tool cover -func` does internally) and returns
+// only the blocks whose final count is zero. The map is keyed by
+// repo-relative file path; entries within a file sort by start
+// line so callers can render in source order.
+//
+// Without the dedup, cross-module `-coverpkg` makes every block
+// appear in N per-module profiles — a single uncovered block
+// renders N times, and a block covered by one module's tests
+// still surfaces N-1 times under "uncovered" because each of the
+// other (N-1) profiles records it with count=0.
 func collectUncoveredBlocks(merged string, prefixes []modules.Import) map[string][]UncoveredBlock {
 	out := map[string][]UncoveredBlock{}
-	for line := range strings.SplitSeq(merged, "\n") {
-		if line == "" || strings.HasPrefix(line, "mode:") {
+	for _, b := range parseMergedBlocks(merged) {
+		if b.Count > 0 {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) < 3 || fields[2] != "0" {
-			continue
-		}
-		path, span, ok := splitProfileHead(fields[0])
-		if !ok {
-			continue
-		}
-		startEnd := strings.Split(span, ",")
-		if len(startEnd) != 2 {
-			continue
-		}
-		startLine, err := strconv.Atoi(strings.SplitN(startEnd[0], ".", 2)[0])
-		if err != nil {
-			continue
-		}
-		endLine, err := strconv.Atoi(strings.SplitN(startEnd[1], ".", 2)[0])
-		if err != nil {
-			continue
-		}
-		stmts, err := strconv.Atoi(fields[1])
-		if err != nil {
-			continue
-		}
-		rel := toRepoRelative(prefixes, path)
+		rel := toRepoRelative(prefixes, b.Path)
 		out[rel] = append(out[rel], UncoveredBlock{
-			StartLine: startLine,
-			EndLine:   endLine,
-			Stmts:     stmts,
+			StartLine: b.StartLine,
+			EndLine:   b.EndLine,
+			Stmts:     b.Stmts,
 		})
 	}
-	for _, blocks := range out {
-		sort.SliceStable(blocks, func(i, j int) bool {
-			return blocks[i].StartLine < blocks[j].StartLine
+	for _, list := range out {
+		sort.SliceStable(list, func(i, j int) bool {
+			return list[i].StartLine < list[j].StartLine
 		})
 	}
 	return out

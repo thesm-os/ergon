@@ -149,6 +149,100 @@ func layerMatchPrefix(layerPath string) string {
 	return p
 }
 
+// mergedBlock is one source block in the merged coverprofile
+// after duplicates (cross-module `-coverpkg` writes the same
+// block into every per-module profile) are collapsed by location
+// and their execution counts summed.
+type mergedBlock struct {
+	// Path is the raw import-path-form file token from the
+	// profile (`go.example.com/proj/cli/foo.go`); callers convert
+	// to repo-relative form via [toRepoRelative].
+	Path string
+
+	// Span is the literal `<sline>.<scol>,<eline>.<ecol>`
+	// substring — kept verbatim so re-emitting matches the
+	// original profile shape.
+	Span string
+
+	// StartLine / EndLine are the integer line numbers extracted
+	// from Span for the renderers that present ranges to the
+	// user.
+	StartLine int
+	EndLine   int
+
+	// Stmts is `numStmts` from the profile row — the same value
+	// every duplicate emits, so it survives untouched through the
+	// merge.
+	Stmts int
+
+	// Count is the SUM of execution counts across every duplicate
+	// of this block in the merged profile. A block whose Count
+	// remains zero after the merge is genuinely uncovered.
+	Count int
+}
+
+// parseMergedBlocks walks the concatenated coverprofile body,
+// deduplicates blocks by (path + span), and returns one
+// [mergedBlock] per distinct location. The atomic-mode SUM of
+// per-profile counts matches what `go tool cover -func` derives
+// internally, so the gate's aggregate agrees with the runner.
+func parseMergedBlocks(merged string) []mergedBlock {
+	type key struct {
+		path string
+		span string
+	}
+	dedup := map[key]*mergedBlock{}
+	for line := range strings.SplitSeq(merged, "\n") {
+		if line == "" || strings.HasPrefix(line, "mode:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		path, span, ok := splitProfileHead(fields[0])
+		if !ok {
+			continue
+		}
+		stmts, err := strconv.Atoi(fields[1])
+		if err != nil {
+			continue
+		}
+		count, err := strconv.Atoi(fields[2])
+		if err != nil {
+			continue
+		}
+		k := key{path: path, span: span}
+		b, found := dedup[k]
+		if !found {
+			startEnd := strings.SplitN(span, ",", 2)
+			if len(startEnd) != 2 {
+				continue
+			}
+			startLine, err := strconv.Atoi(strings.SplitN(startEnd[0], ".", 2)[0])
+			if err != nil {
+				continue
+			}
+			endLine, err := strconv.Atoi(strings.SplitN(startEnd[1], ".", 2)[0])
+			if err != nil {
+				continue
+			}
+			b = &mergedBlock{
+				Path: path, Span: span,
+				StartLine: startLine, EndLine: endLine,
+				Stmts: stmts,
+			}
+			dedup[k] = b
+		}
+		b.Count += count
+	}
+	out := make([]mergedBlock, 0, len(dedup))
+	for _, b := range dedup {
+		out = append(out, *b)
+	}
+	return out
+}
+
 // layerStats records the per-layer aggregate statement coverage
 // — the headline number the gate verdict compares to
 // [Layer.Line]. Matches `go test -cover`'s reported percentage so
@@ -194,47 +288,9 @@ func aggregateByLayer(
 	excludes []policy.Exclude, skips []policy.Skip,
 	funcSpans map[string][]funcSpan,
 ) []layerStats {
-	type blockKey struct {
-		path string // raw import-path form, dedup uses the literal token
-		span string // `<sline>.<scol>,<eline>.<ecol>`
-	}
-	type blockAgg struct {
-		stmts int
-		count int
-	}
-	blocks := map[blockKey]*blockAgg{}
-	for line := range strings.SplitSeq(merged, "\n") {
-		if line == "" || strings.HasPrefix(line, "mode:") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			continue
-		}
-		path, span, ok := splitProfileHead(fields[0])
-		if !ok {
-			continue
-		}
-		stmts, err := strconv.Atoi(fields[1])
-		if err != nil {
-			continue
-		}
-		count, err := strconv.Atoi(fields[2])
-		if err != nil {
-			continue
-		}
-		key := blockKey{path: path, span: span}
-		agg, found := blocks[key]
-		if !found {
-			agg = &blockAgg{stmts: stmts}
-			blocks[key] = agg
-		}
-		agg.count += count
-	}
-
 	out := make([]layerStats, len(packages))
-	for key, agg := range blocks {
-		rel := toRepoRelative(prefixes, key.path)
+	for _, b := range parseMergedBlocks(merged) {
+		rel := toRepoRelative(prefixes, b.Path)
 		idx := LongestPrefixLayerIdx(packages, rel)
 		if idx < 0 {
 			continue
@@ -242,18 +298,13 @@ func aggregateByLayer(
 		if policy.MatchesExclude(rel, excludes) {
 			continue
 		}
-		startEnd := strings.SplitN(key.span, ",", 2)
-		startLine, err := strconv.Atoi(strings.SplitN(startEnd[0], ".", 2)[0])
-		if err != nil {
-			continue
-		}
-		funcName := functionAt(funcSpans[rel], startLine)
+		funcName := functionAt(funcSpans[rel], b.StartLine)
 		if policy.MatchesSkip(funcName, rel, skips) {
 			continue
 		}
-		out[idx].TotalStmts += agg.stmts
-		if agg.count > 0 {
-			out[idx].CoveredStmts += agg.stmts
+		out[idx].TotalStmts += b.Stmts
+		if b.Count > 0 {
+			out[idx].CoveredStmts += b.Stmts
 		}
 	}
 	return out
@@ -546,29 +597,15 @@ func writeUncoveredRanges(
 		return
 	}
 	fmt.Fprintf(w, "\n  %s   %s\n", s.Bolded("Uncovered ranges"), s.Dimmed("(file:start-end (stmts))"))
-	for line := range strings.SplitSeq(merged, "\n") {
-		if line == "" || strings.HasPrefix(line, "mode:") {
+	for _, b := range parseMergedBlocks(merged) {
+		if b.Count > 0 {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) < 3 || fields[2] != "0" {
-			continue
-		}
-		path, span, ok := splitProfileHead(fields[0])
-		if !ok {
-			continue
-		}
-		rel := toRepoRelative(prefixes, path)
+		rel := toRepoRelative(prefixes, b.Path)
 		if !slices.Contains(files, rel) {
 			continue
 		}
-		startEnd := strings.Split(span, ",")
-		if len(startEnd) != 2 {
-			continue
-		}
-		startLine := strings.SplitN(startEnd[0], ".", 2)[0]
-		endLine := strings.SplitN(startEnd[1], ".", 2)[0]
-		fmt.Fprintf(w, "    %s:%s-%s (%s stmts)\n", rel, startLine, endLine, fields[1])
+		fmt.Fprintf(w, "    %s:%d-%d (%d stmts)\n", rel, b.StartLine, b.EndLine, b.Stmts)
 	}
 }
 
