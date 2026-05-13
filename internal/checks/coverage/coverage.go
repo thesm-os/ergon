@@ -89,18 +89,28 @@ func Run(
 	}
 
 	rows := parseFuncLog(funcLog)
+	prefixes := sortedPrefixes(imports)
 
-	targets := selectTargets(cfg.Packages, opts.Targets)
+	// Each row is claimed by its longest-prefix declared layer
+	// in cfg.Packages. The per-layer renderer below shows only
+	// the rows its declared layer claimed, so nested layers
+	// override their parents (declaring `backend/golang/...` at
+	// 80% takes those rows out of a parent `backend/...` at 90%).
+	rowClaim := claimRows(cfg.Packages, prefixes, rows)
+
+	targets, claimIdx := selectTargets(cfg.Packages, opts.Targets)
 	if len(targets) == 0 {
 		return fmt.Errorf("coverage: no matching targets for %v", opts.Targets)
 	}
 
-	prefixes := sortedPrefixes(imports)
 	s := style.Detect(stdout)
 	anyFailed := false
 
-	for _, target := range targets {
-		if renderTarget(stdout, s, target, rows, excludes, skips, prefixes, cfg.TopN, opts.Verbose, mergedBody) {
+	for i, target := range targets {
+		failed := renderTarget(stdout, s, target, claimIdx[i],
+			rows, rowClaim, excludes, skips, prefixes,
+			cfg.TopN, opts.Verbose, mergedBody)
+		if failed {
 			anyFailed = true
 		}
 	}
@@ -127,6 +137,45 @@ func layerMatchPrefix(layerPath string) string {
 		return ""
 	}
 	return p
+}
+
+// claimRows assigns every row to a declared-layer index in
+// cfg.Packages — the layer with the longest prefix that covers
+// the row's repo-relative path. A row that no layer covers (and
+// no wildcard `./...` exists) reports -1; the renderer drops
+// those from every report.
+//
+// Specificity wins: a row under `backend/golang/...` claims that
+// layer, NOT the parent `backend/...` even when both are
+// declared. This ensures a nested layer's threshold overrides
+// the parent for the rows it claims.
+func claimRows(packages []Layer, prefixes []modules.Import, rows []funcRow) []int {
+	out := make([]int, len(rows))
+	for i, r := range rows {
+		out[i] = longestPrefixLayerIdx(packages, toRepoRelative(prefixes, r.Path))
+	}
+	return out
+}
+
+// longestPrefixLayerIdx returns the index of the declared layer
+// with the longest base that covers rel, or -1 when no layer
+// matches. The wildcard sentinel (`./...`) covers every row at
+// length zero so concrete layers always win when both apply.
+func longestPrefixLayerIdx(packages []Layer, rel string) int {
+	bestIdx := -1
+	bestLen := -1
+	for i, p := range packages {
+		base := layerMatchPrefix(p.Path)
+		matches := base == "" || base == rel || strings.HasPrefix(rel, base+"/")
+		if !matches {
+			continue
+		}
+		if len(base) > bestLen {
+			bestIdx = i
+			bestLen = len(base)
+		}
+	}
+	return bestIdx
 }
 
 // sortedPrefixes returns imports sorted by descending ImportPath
@@ -186,17 +235,44 @@ func withDefaults(cfg Config) Config {
 // request. This mirrors the per-function classification rule:
 // when two layers overlap (e.g. `internal/...` and
 // `internal/checks/...`), only the more-specific one applies.
-func selectTargets(packages []Layer, requested []string) []Layer {
+func selectTargets(packages []Layer, requested []string) ([]Layer, []int) {
 	if len(requested) == 0 {
-		return packages
+		idxs := make([]int, len(packages))
+		for i := range packages {
+			idxs[i] = i
+		}
+		return packages, idxs
 	}
-	var out []Layer
+	var (
+		out  []Layer
+		idxs []int
+	)
 	for _, t := range requested {
 		t = strings.TrimSuffix(t, "/")
-		match, ok := longestPrefixLayer(packages, t)
-		if !ok {
+		bestIdx := -1
+		bestLen := -1
+		for i, p := range packages {
+			base := layerMatchPrefix(p.Path)
+			// A user-supplied target must match a CONCRETE
+			// declared layer; the workspace-wide wildcard
+			// sentinel does not count here, so a typo
+			// (`ergon check coverage typoo`) errors out instead
+			// of silently inheriting the wildcard threshold.
+			if base == "" {
+				continue
+			}
+			if base != t && !strings.HasPrefix(t, base+"/") {
+				continue
+			}
+			if len(base) > bestLen {
+				bestIdx = i
+				bestLen = len(base)
+			}
+		}
+		if bestIdx < 0 {
 			continue
 		}
+		match := packages[bestIdx]
 		base := strings.TrimSuffix(match.Path, "/...")
 		path := t + "/..."
 		if base == t {
@@ -208,8 +284,9 @@ func selectTargets(packages []Layer, requested []string) []Layer {
 			Branch:        match.Branch,
 			RequireBranch: match.RequireBranch,
 		})
+		idxs = append(idxs, bestIdx)
 	}
-	return out
+	return out, idxs
 }
 
 // longestPrefixLayer returns the declared layer whose base is the
@@ -241,8 +318,9 @@ func longestPrefixLayer(packages []Layer, t string) (Layer, bool) {
 // and writes the per-target section to stdout. Returns true when
 // at least one function failed the threshold check.
 func renderTarget(
-	stdout io.Writer, s style.Style, layer Layer,
-	rows []funcRow, excludes []policy.Exclude,
+	stdout io.Writer, s style.Style, layer Layer, claimIdx int,
+	rows []funcRow, rowClaim []int,
+	excludes []policy.Exclude,
 	skips []policy.Skip, prefixes []modules.Import, topN int, verbose bool,
 	mergedBody string,
 ) bool {
@@ -254,7 +332,14 @@ func renderTarget(
 		total, passing, failing, skipped, excluded int
 		failures                                   []Failure
 	)
-	for _, r := range rows {
+	for i, r := range rows {
+		// Specificity-wins: a row belongs to the rendered target
+		// iff its longest-prefix declared layer is the one this
+		// target derives from. A more-specific layer claims its
+		// rows out of any parent's report.
+		if rowClaim[i] != claimIdx {
+			continue
+		}
 		rel := toRepoRelative(prefixes, r.Path)
 		if prefix != "" && !strings.HasPrefix(rel, prefix+"/") && rel != prefix {
 			continue

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.thesmos.sh/ergon/internal/checks/policy"
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/modules"
 	"go.thesmos.sh/ergon/internal/style"
@@ -65,6 +66,35 @@ func TestToRepoRelative(t *testing.T) {
 	}
 }
 
+// TestClaimRows pins the specificity-wins rule: each row claims
+// the longest-prefix declared layer, so nested layers override
+// their parents instead of stacking.
+func TestClaimRows(t *testing.T) {
+	t.Parallel()
+
+	packages := []Layer{
+		{Path: "./...", Line: 50},
+		{Path: "backend/...", Line: 90},
+		{Path: "backend/golang/...", Line: 80},
+		{Path: "cli/...", Line: 60},
+	}
+	imports := []modules.Import{
+		{Dir: ".", ImportPath: "go.example.com/proj"},
+		{Dir: "backend/golang", ImportPath: "go.example.com/proj/backend/golang"},
+	}
+	rows := []funcRow{
+		{Path: "go.example.com/proj/eidostest/foo.go", Func: "A"},
+		{Path: "go.example.com/proj/backend/protobuf/foo.go", Func: "B"},
+		{Path: "go.example.com/proj/backend/golang/foo.go", Func: "C"},
+		{Path: "go.example.com/proj/cli/foo.go", Func: "D"},
+	}
+	got := claimRows(packages, sortedPrefixes(imports), rows)
+	want := []int{0, 1, 2, 3} // ./..., backend/..., backend/golang/..., cli/...
+	if !slices.Equal(got, want) {
+		t.Fatalf("claims = %+v, want %+v", got, want)
+	}
+}
+
 // TestParseFuncLog pins the parser against representative
 // `go tool cover -func` output.
 func TestParseFuncLog(t *testing.T) {
@@ -102,7 +132,7 @@ func TestSelectTargets(t *testing.T) {
 
 	t.Run("no request returns every declared layer", func(t *testing.T) {
 		t.Parallel()
-		got := selectTargets(packages, nil)
+		got, _ := selectTargets(packages, nil)
 		if !slices.Equal(extractPaths(got), extractPaths(packages)) {
 			t.Fatalf("got = %+v, want declared layers verbatim", got)
 		}
@@ -110,7 +140,7 @@ func TestSelectTargets(t *testing.T) {
 
 	t.Run("bare layer request: longest-prefix wins", func(t *testing.T) {
 		t.Parallel()
-		got := selectTargets(packages, []string{"internal/checks"})
+		got, _ := selectTargets(packages, []string{"internal/checks"})
 		if len(got) != 1 {
 			t.Fatalf("got = %+v, want exactly one layer", got)
 		}
@@ -121,7 +151,7 @@ func TestSelectTargets(t *testing.T) {
 
 	t.Run("subpath request narrows the layer's path", func(t *testing.T) {
 		t.Parallel()
-		got := selectTargets(packages, []string{"internal/checks/coverage"})
+		got, _ := selectTargets(packages, []string{"internal/checks/coverage"})
 		if got[0].Path != "internal/checks/coverage/..." {
 			t.Errorf("got Path = %q, want internal/checks/coverage/...", got[0].Path)
 		}
@@ -435,14 +465,16 @@ func TestWriteUncoveredRanges(t *testing.T) {
 func TestRenderTarget(t *testing.T) {
 	t.Parallel()
 
-	layer := Layer{Path: "internal/...", Line: 80}
+	packages := []Layer{{Path: "internal/...", Line: 80}}
+	layer := packages[0]
 	rows := []funcRow{
 		{Path: "go.example.com/x/internal/a.go", Func: "Pass", Pct: 100},
 		{Path: "go.example.com/x/internal/b.go", Func: "Fail", Pct: 50},
 		{Path: "go.example.com/x/cmd/c.go", Func: "Outside", Pct: 0},
 	}
+	claims := claimRows(packages, testImports, rows)
 	var buf strings.Builder
-	failed := renderTarget(&buf, style.Style{}, layer, rows, nil, nil,
+	failed := renderTarget(&buf, style.Style{}, layer, 0, rows, claims, nil, nil,
 		testImports, 10, false, "")
 	if !failed {
 		t.Fatal("renderTarget returned false, want true (one row below threshold)")
@@ -455,6 +487,77 @@ func TestRenderTarget(t *testing.T) {
 	}
 	if strings.Contains(out, "Outside") {
 		t.Fatalf("function outside the layer prefix leaked into output: %q", out)
+	}
+}
+
+// TestRenderTargetSpecificityWins pins the claim-based row
+// filter: a row claimed by a nested declared layer is excluded
+// from its parent's report even when both share the prefix.
+func TestRenderTargetSpecificityWins(t *testing.T) {
+	t.Parallel()
+
+	packages := []Layer{
+		{Path: "internal/...", Line: 80},        // idx 0 — the parent
+		{Path: "internal/checks/...", Line: 90}, // idx 1 — the nested
+	}
+	rows := []funcRow{
+		{Path: "go.example.com/x/internal/foo.go", Func: "Parent", Pct: 100},
+		{Path: "go.example.com/x/internal/checks/bar.go", Func: "Nested", Pct: 100},
+	}
+	claims := claimRows(packages, testImports, rows)
+
+	var buf strings.Builder
+	renderTarget(&buf, style.Style{}, packages[0], 0, rows, claims, nil, nil,
+		testImports, 10, false, "")
+	out := buf.String()
+	if !strings.Contains(out, "Functions:  1 total") {
+		t.Fatalf("parent layer should claim only one row: %q", out)
+	}
+	if strings.Contains(out, "Nested") {
+		t.Fatalf("nested-claimed row leaked into parent's report: %q", out)
+	}
+}
+
+// TestRenderTargetPolicyAndPrefix pins the three remaining row-
+// dispositions: a path-prefix mismatch is dropped (narrowed
+// target case), an exclude moves the row to the "excluded"
+// counter, and a skip moves it to "skipped". All three keep the
+// row out of the failures list.
+func TestRenderTargetPolicyAndPrefix(t *testing.T) {
+	t.Parallel()
+
+	packages := []Layer{{Path: "internal/...", Line: 80}}
+	// Narrow the target to a sub-prefix the way positional-arg
+	// resolution does: layer.Path = `internal/foo/...` derived
+	// from the declared `internal/...`.
+	narrowed := Layer{Path: "internal/foo/...", Line: 80}
+	rows := []funcRow{
+		{Path: "go.example.com/x/internal/foo/a.go", Func: "Belongs", Pct: 50},
+		{Path: "go.example.com/x/internal/bar/b.go", Func: "WrongPrefix", Pct: 50},
+		{Path: "go.example.com/x/internal/foo/c.go", Func: "Excluded", Pct: 50},
+		{Path: "go.example.com/x/internal/foo/d.go", Func: "Skipped", Pct: 50},
+	}
+	claims := claimRows(packages, testImports, rows)
+	excludes := []policy.Exclude{{Path: "internal/foo/c.go", Reason: "test"}}
+	skips := []policy.Skip{{Label: "marker", FuncGlob: "Skipped", FileGlob: "internal/foo/d.go"}}
+
+	var buf strings.Builder
+	renderTarget(&buf, style.Style{}, narrowed, 0, rows, claims,
+		excludes, skips, testImports, 10, false, "")
+	out := buf.String()
+	// 3 of 4 rows survive the prefix filter; the WrongPrefix row
+	// is dropped before any counter increments.
+	if !strings.Contains(out, "3 total") {
+		t.Fatalf("want 3 in-scope rows (WrongPrefix dropped): %q", out)
+	}
+	if !strings.Contains(out, "1 excluded") {
+		t.Fatalf("want 1 excluded: %q", out)
+	}
+	if !strings.Contains(out, "1 skipped") {
+		t.Fatalf("want 1 skipped: %q", out)
+	}
+	if strings.Contains(out, "WrongPrefix") {
+		t.Fatalf("out-of-prefix row leaked: %q", out)
 	}
 }
 
