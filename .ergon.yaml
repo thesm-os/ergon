@@ -97,7 +97,7 @@ checks:
       - path: internal/version/...
         reason: ldflags-injected build metadata; no logic
 
-  # mutation — `ergon check mutation` (runner not yet wired)
+  # mutation — `ergon check mutation`
   #
   # Two metrics gate independently per layer:
   #   score    test efficacy = KILLED / (KILLED + LIVED). Of the
@@ -107,7 +107,18 @@ checks:
   #            reached at all. Catches "tests don't reach the
   #            mutateable code".
   mutation:
+    # Per-layer thresholds. An empty list short-circuits the check.
     packages: []
+    # gremlins invocation policy. Workers + test_cpu bound CPU
+    # usage; timeout_coefficient tolerates slow-but-finite tests
+    # (gremlins' default of 3 produces spurious timeouts);
+    # exclude_files drops files whose mutants are unkillable
+    # (default covers stringer-generated `_string.go`).
+    gremlins:
+      workers: 2
+      test_cpu: 2
+      timeout_coefficient: 30
+      exclude_files: '.*_string\.go$'
 
   # error-prefix — `ergon check error-prefix`
   error_prefix:
