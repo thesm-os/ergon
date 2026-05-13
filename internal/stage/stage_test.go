@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
@@ -23,13 +24,18 @@ func TestPerModule(t *testing.T) {
 
 	t.Run("default mode runs every module and aggregates failures", func(t *testing.T) {
 		t.Parallel()
-		var visited []string
+		var (
+			mu      sync.Mutex
+			visited []string
+		)
 		var stdout strings.Builder
 		err := PerModule(t.Context(), &stdout,
 			[]modules.Module{{Dir: "a"}, {Dir: "b"}, {Dir: "c"}}, Options{},
 			"my-stage", "test details",
 			func(_ context.Context, m modules.Module) StepResult {
+				mu.Lock()
 				visited = append(visited, m.Dir)
+				mu.Unlock()
 				if m.Dir == "b" {
 					return StepResult{Err: errors.New("middle fail")}
 				}
@@ -48,6 +54,7 @@ func TestPerModule(t *testing.T) {
 
 	t.Run("fast mode aborts at the first failure", func(t *testing.T) {
 		t.Parallel()
+		// Fast mode is serial inside PerModule, so no mutex needed.
 		var visited []string
 		var stdout strings.Builder
 		err := PerModule(t.Context(), &stdout,
@@ -102,6 +109,40 @@ func TestPerModule(t *testing.T) {
 		}
 		if !strings.Contains(stdout.String(), "skipped (no packages match build tags)") {
 			t.Fatalf("stdout missing skip note: %q", stdout.String())
+		}
+	})
+
+	t.Run("default mode runs modules concurrently", func(t *testing.T) {
+		t.Parallel()
+		// Each fn waits on `ready` before returning. If execution
+		// were serial, only one goroutine could be waiting at a
+		// time and we'd deadlock; concurrent execution lets all N
+		// goroutines reach the wait and then proceed.
+		const n = 4
+		ready := make(chan struct{})
+		started := make(chan struct{}, n)
+		var stdout strings.Builder
+		mods := make([]modules.Module, n)
+		for i := range n {
+			mods[i] = modules.Module{Dir: string(rune('a' + i))}
+		}
+		done := make(chan error, 1)
+		go func() {
+			done <- PerModule(t.Context(), &stdout, mods, Options{},
+				"my-stage", "test details",
+				func(_ context.Context, _ modules.Module) StepResult {
+					started <- struct{}{}
+					<-ready
+					return StepResult{}
+				})
+		}()
+		// Wait until every fn has started, then release them.
+		for range n {
+			<-started
+		}
+		close(ready)
+		if err := <-done; err != nil {
+			t.Fatalf("PerModule err: %v", err)
 		}
 	})
 

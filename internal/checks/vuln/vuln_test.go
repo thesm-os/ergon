@@ -9,6 +9,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
@@ -31,8 +32,12 @@ func TestRun(t *testing.T) {
 			t.Fatalf("Run err: %v", err)
 		}
 		want := []string{"/repo: govulncheck ./...", "/repo/cli: govulncheck ./..."}
-		if !slices.Equal(runner.calls, want) {
-			t.Fatalf("calls = %+v, want %+v", runner.calls, want)
+		gotSorted := slices.Clone(runner.calls)
+		wantSorted := slices.Clone(want)
+		slices.Sort(gotSorted)
+		slices.Sort(wantSorted)
+		if !slices.Equal(gotSorted, wantSorted) {
+			t.Fatalf("calls = %+v, want (set-equal) %+v", gotSorted, wantSorted)
 		}
 	})
 
@@ -68,13 +73,19 @@ func TestRun(t *testing.T) {
 	})
 }
 
+// fakeRunner is concurrent-safe: stage.PerModule's default mode
+// fans out per-module work into one goroutine each, so writes to
+// calls go through mu.
 type fakeRunner struct {
+	mu     sync.Mutex
 	calls  []string
 	runErr error
 }
 
 func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
+	f.mu.Lock()
 	f.calls = append(f.calls, opts.Dir+": "+name+" "+strings.Join(args, " "))
+	f.mu.Unlock()
 	return f.runErr
 }
 

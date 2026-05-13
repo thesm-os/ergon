@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
@@ -39,9 +40,15 @@ func TestRun(t *testing.T) {
 		if len(runner.calls) != 2 {
 			t.Fatalf("calls = %d, want 2", len(runner.calls))
 		}
-		rootCall := runner.calls[0]
-		if rootCall.dir != "/repo" {
-			t.Fatalf("root dir = %q, want /repo", rootCall.dir)
+		// Parallel execution makes the recording order
+		// non-deterministic; index calls by dir before asserting.
+		byDir := map[string]recordedCall{}
+		for _, c := range runner.calls {
+			byDir[c.dir] = c
+		}
+		rootCall, ok := byDir["/repo"]
+		if !ok {
+			t.Fatalf("no call with dir /repo in %+v", runner.calls)
 		}
 		assertContainsAll(t, rootCall.args, []string{
 			"test", "-covermode=atomic", "-cpu=4", "-count=3",
@@ -49,9 +56,9 @@ func TestRun(t *testing.T) {
 			"-coverprofile=" + filepath.Join(in.CoverageDir, "root.out"),
 			"./...",
 		})
-		cliCall := runner.calls[1]
-		if cliCall.dir != "/repo/cli" {
-			t.Fatalf("cli dir = %q, want /repo/cli", cliCall.dir)
+		cliCall, ok := byDir["/repo/cli"]
+		if !ok {
+			t.Fatalf("no call with dir /repo/cli in %+v", runner.calls)
 		}
 		wantFlag := "-coverprofile=" + filepath.Join(in.CoverageDir, "cli.out")
 		if !slices.Contains(cliCall.args, wantFlag) {
@@ -271,8 +278,11 @@ func TestDiscoverFuzzTargets(t *testing.T) {
 	})
 }
 
-// fakeRunner satisfies [xexec.Runner] for tests.
+// fakeRunner satisfies [xexec.Runner] for tests. The mutex
+// covers calls so the runner is safe under stage.PerModule's
+// default (parallel) fan-out.
 type fakeRunner struct {
+	mu     sync.Mutex
 	calls  []recordedCall
 	runErr error
 }
@@ -284,7 +294,9 @@ type recordedCall struct {
 }
 
 func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
+	f.mu.Lock()
 	f.calls = append(f.calls, recordedCall{dir: opts.Dir, name: name, args: slices.Clone(args)})
+	f.mu.Unlock()
 	return f.runErr
 }
 

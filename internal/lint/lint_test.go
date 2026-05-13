@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
@@ -204,8 +205,12 @@ func TestAll(t *testing.T) {
 	})
 }
 
-// fakeRunner satisfies [xexec.Runner] for tests.
+// fakeRunner satisfies [xexec.Runner] for tests. It is safe for
+// concurrent use: per-module fan-out under stage.PerModule's
+// default (parallel) mode hands the same runner to every
+// goroutine, so writes to calls go through mu.
 type fakeRunner struct {
+	mu     sync.Mutex
 	calls  []recordedCall
 	runErr error
 	decide func(name string, args []string) error
@@ -218,7 +223,9 @@ type recordedCall struct {
 }
 
 func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
+	f.mu.Lock()
 	f.calls = append(f.calls, recordedCall{dir: opts.Dir, name: name, args: slices.Clone(args)})
+	f.mu.Unlock()
 	if f.decide != nil {
 		return f.decide(name, args)
 	}
@@ -256,17 +263,20 @@ func commandNames(calls []recordedCall) []string {
 }
 
 // assertCalls compares the recorded calls (formatted as
-// `<dir>: <name> <args>`) against want.
+// `<dir>: <name> <args>`) against want as a set: parallel
+// per-module execution makes the recording order non-
+// deterministic, so the comparison sorts both sides.
 func assertCalls(t *testing.T, got []recordedCall, want []string) {
 	t.Helper()
 	if len(got) != len(want) {
 		t.Fatalf("calls = %+v, want %+v", formatCalls(got), want)
 	}
-	formatted := formatCalls(got)
-	for i, w := range want {
-		if formatted[i] != w {
-			t.Fatalf("calls[%d] = %q, want %q", i, formatted[i], w)
-		}
+	gotSorted := slices.Clone(formatCalls(got))
+	wantSorted := slices.Clone(want)
+	slices.Sort(gotSorted)
+	slices.Sort(wantSorted)
+	if !slices.Equal(gotSorted, wantSorted) {
+		t.Fatalf("calls = %+v, want (set-equal) %+v", gotSorted, wantSorted)
 	}
 }
 

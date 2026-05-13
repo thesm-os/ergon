@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/modules"
@@ -76,6 +77,16 @@ type StepResult struct {
 // header + summary block around the calls. Returns nil when every
 // module passed; otherwise an [errors.Join] of every failure.
 //
+// Concurrency: by default each module's fn runs concurrently in
+// its own goroutine and per-target results are buffered so the
+// summary still renders in declaration order. The default mode
+// already captures tool output per call ([RunAllowSkip] writes
+// into per-call buffers), so concurrent execution does not
+// interleave on stdout. The function falls back to serial
+// execution when [Options.Fast] is set (the dev-loop intent is
+// to abort at the first failure) or [Options.Verbose] is set
+// (live-streamed output from multiple modules would interleave).
+//
 // title and details feed [style.Style.Header]; the closing
 // summary message is composed from a count of failures.
 func PerModule(
@@ -85,18 +96,17 @@ func PerModule(
 ) error {
 	s := style.Detect(stdout)
 	s.Header(stdout, title, details)
-	results := make([]style.StageResult, 0, len(mods))
-	var failures []error
-	for _, m := range mods {
-		r := fn(ctx, m)
-		results = append(results, makeResult(m.Dir, r))
-		if r.Err != nil {
-			failures = append(failures, fmt.Errorf("[%s]: %w", m.Dir, r.Err))
-			if opts.Fast {
-				break
-			}
-		}
+
+	var (
+		results  []style.StageResult
+		failures []error
+	)
+	if opts.Fast || opts.Verbose {
+		results, failures = runSerial(ctx, mods, opts.Fast, fn)
+	} else {
+		results, failures = runParallel(ctx, mods, fn)
 	}
+
 	pass := fmt.Sprintf("every module passed %s", title)
 	var fail string
 	if len(failures) > 0 {
@@ -107,6 +117,60 @@ func PerModule(
 		return nil
 	}
 	return errors.Join(failures...)
+}
+
+// runSerial iterates mods sequentially, recording one
+// [style.StageResult] per module. When fast is true the loop
+// aborts at the first failure; otherwise every module runs and
+// the failure slice carries each.
+func runSerial(
+	ctx context.Context, mods []modules.Module, fast bool,
+	fn func(context.Context, modules.Module) StepResult,
+) ([]style.StageResult, []error) {
+	results := make([]style.StageResult, 0, len(mods))
+	var failures []error
+	for _, m := range mods {
+		r := fn(ctx, m)
+		results = append(results, makeResult(m.Dir, r))
+		if r.Err != nil {
+			failures = append(failures, fmt.Errorf("[%s]: %w", m.Dir, r.Err))
+			if fast {
+				break
+			}
+		}
+	}
+	return results, failures
+}
+
+// runParallel runs every module's fn in its own goroutine and
+// returns the assembled results + failures in declaration order.
+// Each goroutine writes to its own index of the pre-allocated
+// results slice; the failures slice is built sequentially after
+// the wait group drains so its order matches the input.
+func runParallel(
+	ctx context.Context, mods []modules.Module,
+	fn func(context.Context, modules.Module) StepResult,
+) ([]style.StageResult, []error) {
+	stepResults := make([]StepResult, len(mods))
+	var wg sync.WaitGroup
+	wg.Add(len(mods))
+	for i, m := range mods {
+		go func(i int, m modules.Module) {
+			defer wg.Done()
+			stepResults[i] = fn(ctx, m)
+		}(i, m)
+	}
+	wg.Wait()
+
+	results := make([]style.StageResult, len(mods))
+	var failures []error
+	for i, m := range mods {
+		results[i] = makeResult(m.Dir, stepResults[i])
+		if stepResults[i].Err != nil {
+			failures = append(failures, fmt.Errorf("[%s]: %w", m.Dir, stepResults[i].Err))
+		}
+	}
+	return results, failures
 }
 
 // RunAllowSkip executes name with args via runner and returns a

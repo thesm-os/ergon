@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
@@ -161,15 +163,20 @@ func TestVerify(t *testing.T) {
 
 // fakeRunner satisfies [xexec.Runner] for tests. Each call is
 // recorded as `<cwd>: <name> <args...>`; optional decide and
-// runErr fields control the simulated return value.
+// runErr fields control the simulated return value. The mutex
+// makes the runner safe for the per-module fan-out
+// stage.PerModule's default (parallel) mode triggers.
 type fakeRunner struct {
+	mu     sync.Mutex
 	calls  []string
 	runErr error
 	decide func(name string, args []string) error
 }
 
 func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
+	f.mu.Lock()
 	f.calls = append(f.calls, opts.Dir+": "+name+" "+strings.Join(args, " "))
+	f.mu.Unlock()
 	if f.decide != nil {
 		return f.decide(name, args)
 	}
@@ -182,14 +189,19 @@ func (*fakeRunner) LookPath(name string) (string, error) {
 
 // assertCalls compares the recorded calls against want. Want must
 // be exactly equal to got.
+// assertCalls compares recorded calls against want as a set —
+// the per-module fan-out runs concurrently under stage.PerModule's
+// default mode, so the recording order is non-deterministic.
 func assertCalls(t *testing.T, got, want []string) {
 	t.Helper()
 	if len(got) != len(want) {
 		t.Fatalf("calls = %+v, want %+v", got, want)
 	}
-	for i, w := range want {
-		if got[i] != w {
-			t.Fatalf("calls[%d] = %q, want %q", i, got[i], w)
-		}
+	gotSorted := slices.Clone(got)
+	wantSorted := slices.Clone(want)
+	slices.Sort(gotSorted)
+	slices.Sort(wantSorted)
+	if !slices.Equal(gotSorted, wantSorted) {
+		t.Fatalf("calls = %+v, want (set-equal) %+v", gotSorted, wantSorted)
 	}
 }

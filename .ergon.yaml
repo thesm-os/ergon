@@ -134,10 +134,10 @@ checks:
         line: 70
         branch: 70
         require_branch: false
-      - path: cmd/ergon/...
-        line: 50
-        branch: 50
-        require_branch: false
+    # cmd/ergon/... is intentionally not gated. The package is
+    # cobra wiring (every file's init() registers a subcommand and
+    # binds flags); the underlying logic is owned by — and tested
+    # in — the internal/* packages each command delegates to.
     # Cap on the per-target list of below-threshold functions.
     # Anything past the cap is collapsed into "… and N more".
     top_n: 10
