@@ -1,0 +1,7 @@
+# ergon's own configuration.
+#
+# All fields are optional; values not set here are auto-discovered
+# from go.mod, go.work, repo layout, and other config files. This
+# file overrides discovered defaults.
+
+name: ergon

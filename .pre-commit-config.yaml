@@ -1,0 +1,47 @@
+# ergon pre-commit configuration.
+#
+# Install:  pre-commit install --hook-type pre-commit \
+#                              --hook-type pre-push \
+#                              --hook-type commit-msg
+#
+# Go/Markdown/license hooks delegate to the Makefile.
+
+default_stages: [pre-commit]
+
+repos:
+  # ─── File hygiene ──────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: check-yaml
+        args: ["--allow-multiple-documents"]
+      - id: check-json
+      - id: check-toml
+      - id: check-symlinks
+
+  # ─── Pre-commit: full gate ────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: check
+        name: make check
+        entry: make check
+        language: system
+        pass_filenames: false
+
+  # ─── Commit message ───────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: commitlint
+        name: commitlint
+        entry: npx --yes --package @commitlint/cli@latest --package @commitlint/config-conventional@latest -- commitlint --edit
+        language: system
+        stages: [commit-msg]

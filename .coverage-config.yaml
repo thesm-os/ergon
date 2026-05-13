@@ -1,0 +1,23 @@
+# Coverage-threshold configuration.
+#
+# Consumed by `ergon check coverage`. Each function in the merged
+# coverprofile is matched against the longest-prefix `packages[].path`
+# glob; the matching layer's `line` value is the threshold.
+# `excludes[].path` globs are reported as skipped and never fail.
+#
+# Globs use Go's `...` recursive wildcard plus shell `*` single-segment
+# wildcards. Both translate to regex internally.
+
+packages:
+  - path: "internal/checks/..."
+    line: 80
+  - path: "internal/release/..."
+    line: 80
+  - path: "internal/..."
+    line: 70
+  - path: "cmd/ergon/..."
+    line: 50
+
+excludes:
+  - path: "**/*_test.go"
+  - path: "internal/version/..."
