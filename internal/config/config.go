@@ -14,6 +14,7 @@
 package config
 
 import (
+	"go.thesmos.sh/ergon/internal/bench"
 	"go.thesmos.sh/ergon/internal/bootstrap"
 	"go.thesmos.sh/ergon/internal/checks/commitmsg"
 	"go.thesmos.sh/ergon/internal/checks/coverage"
@@ -64,6 +65,10 @@ type Config struct {
 	// [test.Config] for field semantics.
 	Test test.Config `mapstructure:"test"`
 
+	// Bench configures `ergon bench baseline` and `ergon bench
+	// regression`. See [bench.Config].
+	Bench bench.Config `mapstructure:"bench"`
+
 	// Checks configures the `ergon check *` subcommands.
 	Checks ChecksConfig `mapstructure:"checks"`
 }
@@ -99,6 +104,7 @@ func Defaults() Config {
 		License:   license.Defaults(),
 		Markdown:  markdown.Defaults(),
 		Test:      test.Defaults(),
+		Bench:     bench.Defaults(),
 		Checks: ChecksConfig{
 			Coverage:    coverage.Defaults(),
 			Mutation:    mutation.Defaults(),

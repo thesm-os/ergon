@@ -65,6 +65,13 @@ test:
   # Per-target wall-clock budget for `ergon test fuzz`.
   fuzz_time: 30s
 
+# bench — `ergon bench baseline` and `ergon bench regression`
+bench:
+  # Repo-relative path where `ergon bench baseline` writes the
+  # pinned reference output. `ergon bench regression` reads it
+  # back at compare time.
+  baseline_path: bench/baseline.txt
+
 # checks — `ergon check` and its subcommands
 checks:
   # coverage — `ergon check coverage`
