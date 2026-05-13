@@ -71,6 +71,13 @@ bench:
   # pinned reference output. `ergon bench regression` reads it
   # back at compare time.
   baseline_path: bench/baseline.txt
+  # Per-metric regression thresholds (percent). `ergon bench
+  # regression` parses `benchstat -format csv` and fails any
+  # per-benchmark per-metric delta above the matching threshold.
+  thresholds:
+    time_percent: 5
+    bytes_percent: 5
+    allocs_percent: 5
 
 # checks — `ergon check` and its subcommands
 checks:

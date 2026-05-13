@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,16 +19,19 @@ import (
 	"go.thesmos.sh/ergon/internal/test"
 )
 
-// TestBaseline pins the contract of [Baseline]: runs the bench
-// invocation per module, concatenates output into cfg.BaselinePath,
-// and creates the containing directory when missing.
+// TestBaseline pins the contract of [Baseline]: writes the baseline
+// file only when `Benchmark` lines are present in the captured
+// output, surfaces subprocess failures with the module dir, and
+// creates the destination directory as needed.
 func TestBaseline(t *testing.T) {
 	t.Parallel()
 
 	t.Run("writes per-module bench output to the baseline path", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
-		runner := &fakeRunner{output: "BenchmarkX-8\t1000\t100 ns/op\n"}
+		runner := &fakeRunner{outputs: map[string]string{
+			"go": "BenchmarkX-8\t1000\t100 ns/op\n",
+		}}
 
 		err := Baseline(t.Context(), runner, io.Discard, io.Discard,
 			root,
@@ -41,22 +45,37 @@ func TestBaseline(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read baseline: %v", err)
 		}
-		// Both modules' output should be present (the fake runner
-		// produces the same line twice — once per module).
 		if strings.Count(string(body), "BenchmarkX-8") != 2 {
 			t.Fatalf("baseline = %q, want both modules' output", string(body))
+		}
+	})
+
+	t.Run("no benchmarks short-circuits and does not write the file", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		runner := &fakeRunner{outputs: map[string]string{
+			"go": "PASS\nok  pkg/foo  0.001s\n",
+		}}
+
+		err := Baseline(t.Context(), runner, io.Discard, io.Discard,
+			root, []modules.Module{{Dir: "."}}, testCfg(1, time.Minute), Defaults())
+		if err != nil {
+			t.Fatalf("Baseline err: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(root, "bench", "baseline.txt")); !os.IsNotExist(err) {
+			t.Fatalf("baseline written despite no benchmarks; stat err = %v", err)
 		}
 	})
 
 	t.Run("creates the baseline directory when missing", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
-		runner := &fakeRunner{output: "BenchmarkX-8\t1\t1 ns/op\n"}
+		runner := &fakeRunner{outputs: map[string]string{
+			"go": "BenchmarkX-8\t1\t1 ns/op\n",
+		}}
 
-		// bench/ does not exist yet.
-		err := Baseline(t.Context(), runner, io.Discard, io.Discard,
-			root, []modules.Module{{Dir: "."}}, testCfg(1, time.Minute), Defaults())
-		if err != nil {
+		if err := Baseline(t.Context(), runner, io.Discard, io.Discard,
+			root, []modules.Module{{Dir: "."}}, testCfg(1, time.Minute), Defaults()); err != nil {
 			t.Fatalf("Baseline err: %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(root, "bench", "baseline.txt")); err != nil {
@@ -81,8 +100,9 @@ func TestBaseline(t *testing.T) {
 }
 
 // TestRegression pins the contract of [Regression]: requires the
-// baseline file to exist, runs the bench into a temp file, and
-// invokes benchstat against the (baseline, current) pair.
+// baseline file to exist, runs the bench into a temp file, hands
+// both to benchstat (text + CSV), parses the CSV, and enforces
+// per-metric thresholds.
 func TestRegression(t *testing.T) {
 	t.Parallel()
 
@@ -98,48 +118,108 @@ func TestRegression(t *testing.T) {
 		}
 	})
 
-	t.Run("runs bench then invokes benchstat with both paths", func(t *testing.T) {
+	t.Run("no benchmarks short-circuits with no regression check", func(t *testing.T) {
 		t.Parallel()
-		root := t.TempDir()
-		baselineDir := filepath.Join(root, "bench")
-		if err := os.MkdirAll(baselineDir, 0o700); err != nil {
-			t.Fatalf("mkdir bench: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(baselineDir, "baseline.txt"),
-			[]byte("BenchmarkX-8\t1\t1 ns/op\n"), 0o600); err != nil {
-			t.Fatalf("write baseline: %v", err)
-		}
+		root := seededRoot(t)
+		runner := &fakeRunner{outputs: map[string]string{
+			"go": "PASS\nok\n",
+		}}
 
-		runner := &recordingRunner{output: "BenchmarkX-8\t1\t2 ns/op\n"}
 		err := Regression(t.Context(), runner, io.Discard, io.Discard,
 			root, []modules.Module{{Dir: "."}}, testCfg(1, time.Minute), Defaults())
 		if err != nil {
 			t.Fatalf("Regression err: %v", err)
 		}
-		// First call is go test -bench; second is benchstat.
-		if len(runner.calls) != 2 {
-			t.Fatalf("calls = %d, want 2", len(runner.calls))
+		// Only the bench call happened; benchstat never ran.
+		for _, c := range runner.calls {
+			if c.name == "benchstat" {
+				t.Fatalf("benchstat ran despite no benchmarks: %+v", c)
+			}
 		}
-		if runner.calls[1].name != "benchstat" {
-			t.Fatalf("calls[1].name = %q, want benchstat", runner.calls[1].name)
+	})
+
+	t.Run("happy path: bench + benchstat (text + csv); zero regressions returns nil", func(t *testing.T) {
+		t.Parallel()
+		root := seededRoot(t)
+		runner := &fakeRunner{outputs: map[string]string{
+			"go":            "BenchmarkX-8\t1\t1 ns/op\n",
+			"benchstat":     "no regressions in human form\n",
+			"benchstat-csv": noRegressionCSV,
+		}}
+
+		err := Regression(t.Context(), runner, io.Discard, io.Discard,
+			root, []modules.Module{{Dir: "."}}, testCfg(1, time.Minute), Defaults())
+		if err != nil {
+			t.Fatalf("Regression err: %v", err)
 		}
-		if !strings.Contains(runner.calls[1].args[0], "baseline.txt") {
-			t.Fatalf("benchstat args = %+v, want baseline.txt as first arg", runner.calls[1].args)
+		// Three calls: go test, benchstat (text), benchstat -format csv.
+		if len(runner.calls) != 3 {
+			t.Fatalf("calls = %d, want 3 (%+v)", len(runner.calls), callNames(runner.calls))
+		}
+		want := []string{"go", "benchstat", "benchstat"}
+		if !slices.Equal(callNames(runner.calls), want) {
+			t.Fatalf("call sequence = %+v, want %+v", callNames(runner.calls), want)
+		}
+	})
+
+	t.Run("regressions exceeding threshold surface as an error", func(t *testing.T) {
+		t.Parallel()
+		root := seededRoot(t)
+		runner := &fakeRunner{outputs: map[string]string{
+			"go":            "BenchmarkX-8\t1\t1 ns/op\n",
+			"benchstat":     "regressions in human form\n",
+			"benchstat-csv": sampleCSV, // +8.9% / +50% deltas vs 5% threshold
+		}}
+
+		err := Regression(t.Context(), runner, io.Discard, io.Discard,
+			root, []modules.Module{{Dir: "."}}, testCfg(1, time.Minute), Defaults())
+		if err == nil {
+			t.Fatal("Regression returned nil, want regression error")
+		}
+		if !strings.Contains(err.Error(), "regression") {
+			t.Fatalf("err = %v, want it to mention regression", err)
 		}
 	})
 }
 
-// fakeRunner satisfies [xexec.Runner] for tests. It writes
-// `output` to opts.Stdout for every Run invocation and returns
-// runErr.
+// noRegressionCSV is `benchstat -format csv` output where old and
+// new values are identical so every metric yields delta=0.
+const noRegressionCSV = `goos: linux
+goarch: amd64
+pkg: foo
+cpu: Intel
+,/old.txt,,/new.txt,,,
+,sec/op,CI,sec/op,CI,vs base,P
+A-8,100,∞,100,∞,~,p=1.000 n=3
+geomean,100,,100,,+0.00%,
+`
+
+// fakeRunner satisfies [xexec.Runner] for tests. outputs is keyed
+// by command name (e.g. "go", "benchstat"); a "benchstat-csv"
+// entry overrides "benchstat" when the args contain "csv" so
+// tests can supply distinct stdout for the text and CSV
+// invocations.
 type fakeRunner struct {
-	output string
-	runErr error
+	calls   []recordedCall
+	outputs map[string]string
+	runErr  error
 }
 
-func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, _ string, _ ...string) error {
+type recordedCall struct {
+	name string
+	args []string
+}
+
+func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
+	f.calls = append(f.calls, recordedCall{name: name, args: slices.Clone(args)})
 	if opts.Stdout != nil {
-		_, _ = opts.Stdout.Write([]byte(f.output))
+		key := name
+		if name == "benchstat" && slices.Contains(args, "csv") {
+			key = "benchstat-csv"
+		}
+		if out, ok := f.outputs[key]; ok {
+			_, _ = opts.Stdout.Write([]byte(out))
+		}
 	}
 	return f.runErr
 }
@@ -148,28 +228,30 @@ func (*fakeRunner) LookPath(name string) (string, error) {
 	return "/usr/local/bin/" + name, nil
 }
 
-// recordingRunner is fakeRunner with per-call recording so tests
-// can assert on the sequence.
-type recordingRunner struct {
-	calls  []recordedCall
-	output string
-}
-
-type recordedCall struct {
-	name string
-	args []string
-}
-
-func (r *recordingRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
-	if opts.Stdout != nil {
-		_, _ = opts.Stdout.Write([]byte(r.output))
+// seededRoot returns a fresh tempdir with bench/baseline.txt
+// populated so [Regression] does not short-circuit on
+// ErrBaselineMissing.
+func seededRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "bench"), 0o700); err != nil {
+		t.Fatalf("mkdir bench: %v", err)
 	}
-	r.calls = append(r.calls, recordedCall{name: name, args: append([]string(nil), args...)})
-	return nil
+	if err := os.WriteFile(filepath.Join(root, "bench", "baseline.txt"),
+		[]byte("BenchmarkX-8\t1\t1 ns/op\n"), 0o600); err != nil {
+		t.Fatalf("write baseline: %v", err)
+	}
+	return root
 }
 
-func (*recordingRunner) LookPath(name string) (string, error) {
-	return "/usr/local/bin/" + name, nil
+// callNames extracts the command names from a recorded call
+// sequence so tests can assert on order without per-arg noise.
+func callNames(calls []recordedCall) []string {
+	out := make([]string, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, c.name)
+	}
+	return out
 }
 
 // testCfg returns a test.Config with the supplied bench-relevant
