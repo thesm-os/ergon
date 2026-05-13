@@ -67,8 +67,22 @@ func All(
 	}{
 		{"vet", func() error { return Vet(ctx, runner, stdout, stderr, in, opts) }},
 		{"go", func() error { return Go(ctx, runner, stdout, stderr, in, opts) }},
-		{"markdown", func() error { return markdown.Lint(ctx, runner, stdout, stderr, in.Root, markdownCfg) }},
-		{"license", func() error { return license.Verify(ctx, runner, stdout, stderr, in.Root, licenseCfg) }},
+		{"markdown", func() error {
+			return stage.Single(ctx, stdout, opts,
+				"markdownlint", "Markdown style and link checks",
+				"every Markdown file passed", "",
+				func(_ context.Context, sOut, sErr io.Writer) error {
+					return markdown.Lint(ctx, runner, sOut, sErr, in.Root, markdownCfg)
+				})
+		}},
+		{"license", func() error {
+			return stage.Single(ctx, stdout, opts,
+				"go-license", "SPDX license-header verification",
+				"every source file carries the expected SPDX header", "",
+				func(_ context.Context, sOut, sErr io.Writer) error {
+					return license.Verify(ctx, runner, sOut, sErr, in.Root, licenseCfg)
+				})
+		}},
 	} {
 		err := st.run()
 		record(st.name, err)

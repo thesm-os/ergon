@@ -47,8 +47,10 @@ func TestRule(t *testing.T) {
 	}
 }
 
-// TestHeader pins the title-with-rules shape every check command
-// uses to open a per-target section.
+// TestHeader pins the title-with-rule shape every gate section
+// uses to open. There is exactly one rule (above the title);
+// adjacent sections share the next section's opening rule, so
+// stacking two would drown the report in horizontal chrome.
 func TestHeader(t *testing.T) {
 	t.Parallel()
 
@@ -61,9 +63,10 @@ func TestHeader(t *testing.T) {
 	if !strings.Contains(got, "line ≥ 100%") {
 		t.Fatalf("Header missing details: %q", got)
 	}
-	// Two rule lines bracket the title.
-	if strings.Count(got, "──") < 2 {
-		t.Fatalf("Header should have two rule lines: %q", got)
+	// Exactly one rule line — adjacent sections share the next
+	// section's opening rule as their separator.
+	if n := strings.Count(got, rule); n != 1 {
+		t.Fatalf("Header should have exactly one rule line, got %d: %q", n, got)
 	}
 }
 

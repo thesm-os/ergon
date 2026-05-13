@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
@@ -171,6 +172,71 @@ func runParallel(
 		}
 	}
 	return results, failures
+}
+
+// Single runs fn as a single-target stage: opens the section
+// header, invokes fn, then writes a one-line verdict. Used by
+// the gate subsystems that do NOT fan out per module
+// (`markdownlint`, `go-license --verify`, `skip-expiry`,
+// `error-prefix`, the no-thresholds short-circuit in coverage /
+// mutation) so the umbrella report looks consistent regardless
+// of whether a stage is per-module or workspace-wide.
+//
+// Mode (mirroring [PerModule] / [RunAllowSkip]):
+//
+//   - opts.Verbose=false (default): stdout and stderr are routed
+//     into a single buffer. On success the buffer is dropped and
+//     only the verdict line renders; on failure the buffer is
+//     indented + dimmed under the failing verdict.
+//
+//   - opts.Verbose=true: stdout/stderr stream live to the
+//     caller's writers; the verdict line still renders after fn
+//     returns.
+//
+// passMessage and failMessage feed the verdict line — typically
+// "<stage> passed" / "<stage> reported N findings" or similar.
+// When failMessage is empty the renderer falls back to the
+// formatted error.
+func Single(
+	ctx context.Context, stdout io.Writer, opts Options,
+	title, details, passMessage, failMessage string,
+	fn func(ctx context.Context, stdout, stderr io.Writer) error,
+) error {
+	s := style.Detect(stdout)
+	s.Header(stdout, title, details)
+
+	var (
+		err    error
+		output string
+	)
+	if opts.Verbose {
+		err = fn(ctx, stdout, stdout)
+	} else {
+		var captured bytes.Buffer
+		err = fn(ctx, &captured, &captured)
+		if err != nil {
+			output = captured.String()
+		}
+	}
+
+	fmt.Fprintln(stdout)
+	if err == nil {
+		if passMessage == "" {
+			passMessage = title + " passed"
+		}
+		s.FinalVerdict(stdout, true, passMessage)
+		fmt.Fprintln(stdout)
+		return nil
+	}
+	if failMessage == "" {
+		failMessage = err.Error()
+	}
+	s.FinalVerdict(stdout, false, failMessage)
+	if body := strings.TrimRight(output, "\n"); body != "" {
+		fmt.Fprintln(stdout, s.Dimmed(style.Indent(body, "      ")))
+	}
+	fmt.Fprintln(stdout)
+	return err
 }
 
 // RunAllowSkip executes name with args via runner and returns a

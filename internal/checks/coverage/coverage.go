@@ -58,7 +58,11 @@ func Run(
 ) error {
 	cfg = withDefaults(cfg)
 	if len(cfg.Packages) == 0 {
-		fmt.Fprintln(stdout, "coverage: no thresholds declared in .ergon.yaml; skipping")
+		s := style.Detect(stdout)
+		s.Header(stdout, "coverage", "per-layer line thresholds")
+		fmt.Fprintln(stdout)
+		fmt.Fprintf(stdout, "  %s\n", s.Dimmed("— skipped (no thresholds declared in .ergon.yaml)"))
+		fmt.Fprintln(stdout)
 		return nil
 	}
 

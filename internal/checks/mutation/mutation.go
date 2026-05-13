@@ -70,7 +70,11 @@ func Run(
 	excludes []policy.Exclude, skips []policy.Skip, opts RunOptions,
 ) error {
 	if len(cfg.Packages) == 0 {
-		fmt.Fprintln(stdout, "mutation: no thresholds declared in .ergon.yaml; skipping")
+		s := style.Detect(stdout)
+		s.Header(stdout, "mutation", "per-layer score / coverage thresholds")
+		fmt.Fprintln(stdout)
+		fmt.Fprintf(stdout, "  %s\n", s.Dimmed("— skipped (no thresholds declared in .ergon.yaml)"))
+		fmt.Fprintln(stdout)
 		return nil
 	}
 	cfg = withDefaults(cfg)

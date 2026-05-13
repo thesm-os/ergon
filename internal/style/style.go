@@ -74,15 +74,14 @@ func (s Style) Rule(w io.Writer) {
 	fmt.Fprintf(w, "%s%s%s\n", s.Dim, rule, s.Reset)
 }
 
-// Header writes a section header: a dim rule, the title in bold,
-// the details column unformatted, then a closing dim rule.
-//
-// The shape matches the bash scripts so users moving between
-// `make check` (old) and `ergon check` (new) see the same layout.
+// Header writes a section header: a dim rule above the bold
+// title and the details column. There is no closing rule —
+// adjacent sections share the next section's opening rule as the
+// separator, which keeps the report from drowning in horizontal
+// chrome.
 func (s Style) Header(w io.Writer, title, details string) {
 	s.Rule(w)
 	fmt.Fprintf(w, "  %s%s%s    %s\n", s.Bold, title, s.Reset, details)
-	s.Rule(w)
 }
 
 // Verdict returns the bold-coloured "✓ PASS" or "✗ FAIL" badge
@@ -120,17 +119,17 @@ func (s Style) Dimmed(text string) string {
 	return s.Dim + text + s.Reset
 }
 
-// FinalVerdict writes the closing per-run verdict block: a rule,
-// the verdict line, another rule. Use after every per-target
-// section has rendered.
+// FinalVerdict writes the per-run verdict as a single bolded
+// line — no surrounding rules. The opening [Style.Header] rule
+// already framed the section, and stacking a closing rule on
+// every section's verdict drowns multi-stage reports in
+// horizontal chrome.
 func (s Style) FinalVerdict(w io.Writer, pass bool, message string) {
-	s.Rule(w)
 	if pass {
 		fmt.Fprintf(w, "  %s%s✓ PASS%s    %s\n", s.Bold, s.Green, s.Reset, message)
 	} else {
 		fmt.Fprintf(w, "  %s%s✗ FAIL%s    %s\n", s.Bold, s.Red, s.Reset, message)
 	}
-	s.Rule(w)
 }
 
 // StageResult records one labelled outcome inside a stage. The
@@ -208,12 +207,14 @@ func (s Style) Summary(w io.Writer, results []StageResult, passMessage, failMess
 	fmt.Fprintln(w)
 	if failed == 0 {
 		s.FinalVerdict(w, true, passMessage)
+		fmt.Fprintln(w)
 		return false
 	}
 	if failMessage == "" {
 		failMessage = fmt.Sprintf("%d of %d target(s) failed", failed, len(results))
 	}
 	s.FinalVerdict(w, false, failMessage)
+	fmt.Fprintln(w)
 	return true
 }
 

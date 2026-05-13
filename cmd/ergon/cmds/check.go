@@ -4,8 +4,10 @@
 package cmds
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -111,13 +113,23 @@ var checkCmd = &cobra.Command{
 				if err := gitFiles(); err != nil {
 					return err
 				}
-				return skipexpiry.Run(stdout, stderr, root, goFiles)
+				return stage.Single(ctx, stdout, opts,
+					"skip-expiry", "scan t.Skip() for an expiry date",
+					"every t.Skip carries a parseable expiry date", "",
+					func(_ context.Context, sOut, sErr io.Writer) error {
+						return skipexpiry.Run(sOut, sErr, root, goFiles)
+					})
 			}},
 			{"error-prefix", func() error {
 				if err := gitFiles(); err != nil {
 					return err
 				}
-				return errorprefix.Run(stdout, stderr, root, goFiles, cfg.Checks.ErrorPrefix)
+				return stage.Single(ctx, stdout, opts,
+					"error-prefix", "errors.New text starts with the package name",
+					"every errors.New carries the expected package prefix", "",
+					func(_ context.Context, sOut, sErr io.Writer) error {
+						return errorprefix.Run(sOut, sErr, root, goFiles, cfg.Checks.ErrorPrefix)
+					})
 			}},
 			{"vuln", func() error { return vuln.Run(ctx, runner, stdout, stderr, root, mods, opts) }},
 		}
