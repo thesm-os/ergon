@@ -35,7 +35,6 @@ linters:
     - modernize
     - unparam
     # Architecture & style
-    - decorder
     - depguard
     - dupword
     - gocritic
@@ -52,24 +51,17 @@ linters:
     - containedctx
     - contextcheck
     - errname
-    - fatcontext
-    - spancheck
     - whitespace
     # Test hygiene
-    - testifylint
     - thelper
     - tparallel
-    - paralleltest
     - usetesting
 
   settings:
-    decorder:
-      disable-dec-order-check: true
-      disable-init-func-first-check: false
-
     depguard:
       rules:
-        # internal/ is library-shaped: stay close to stdlib.
+        # internal/ holds business logic. cobra is the CLI framework
+        # and must not leak in.
         internal:
           list-mode: lax
           files:
@@ -80,10 +72,8 @@ linters:
             - pkg: "github.com/pkg/errors"
               desc: "use stdlib errors + fmt.Errorf"
             - pkg: "github.com/spf13/cobra"
-              desc: "cobra belongs in cmd/ergon/cmds; internal/ should not depend on the CLI framework"
-            - pkg: "github.com/spf13/viper"
-              desc: "viper belongs in cmd/ergon/cmds; config loading lives in internal/config without it"
-        # cmd/ergon/cmds is the cobra layer — cobra/viper allowed here.
+              desc: "cobra belongs in cmd/ergon/cmds; internal/ must not depend on the CLI framework"
+        # cmd/ holds cobra wiring only — no business logic.
         cmd:
           list-mode: lax
           files:
@@ -169,14 +159,10 @@ linters:
       - std-error-handling
       - common-false-positives
     rules:
-      # Test functions are naturally large (table-driven, setup,
-      # multi-phase scenarios). Complexity and constant linters add noise.
-      - path: '_test\.go'
-        linters: [gocognit, maintidx, cyclop, funlen, goconst]
-
-      # Test helpers may return (nil, nil) from stubs and use unparam'd args.
+      # Tests legitimately use goconst-tripping repeated strings and
+      # may return (nil, nil) from stubs.
       - path: '(_test\.go|testutil/|.*test/)'
-        linters: [nilnil, unparam]
+        linters: [goconst, nilnil, unparam]
 
       # fieldalignment is noise for a CLI tool — structs are not on hot paths.
       - linters: [govet]
