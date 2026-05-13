@@ -15,6 +15,8 @@ package config
 
 import (
 	"go.thesmos.sh/ergon/internal/bootstrap"
+	"go.thesmos.sh/ergon/internal/checks/commitmsg"
+	"go.thesmos.sh/ergon/internal/checks/errorprefix"
 	"go.thesmos.sh/ergon/internal/license"
 	"go.thesmos.sh/ergon/internal/markdown"
 	"go.thesmos.sh/ergon/internal/test"
@@ -59,6 +61,22 @@ type Config struct {
 	// Test configures `ergon test` and its subcommands. See
 	// [test.Config] for field semantics.
 	Test test.Config `mapstructure:"test"`
+
+	// Checks configures the `ergon check *` subcommands.
+	Checks ChecksConfig `mapstructure:"checks"`
+}
+
+// ChecksConfig groups the per-check configs so each subsystem's
+// settings live under a single top-level YAML key (`checks:`) the
+// way the design's example shows.
+type ChecksConfig struct {
+	// ErrorPrefix configures `ergon check error-prefix`. See
+	// [errorprefix.Config].
+	ErrorPrefix errorprefix.Config `mapstructure:"error_prefix"`
+
+	// CommitMsg configures `ergon check commit-msg`. See
+	// [commitmsg.Config].
+	CommitMsg commitmsg.Config `mapstructure:"commit_msg"`
 }
 
 // Defaults returns the Config populated with each subsystem's own
@@ -71,5 +89,9 @@ func Defaults() Config {
 		License:   license.Defaults(),
 		Markdown:  markdown.Defaults(),
 		Test:      test.Defaults(),
+		Checks: ChecksConfig{
+			ErrorPrefix: errorprefix.Defaults(),
+			CommitMsg:   commitmsg.Defaults(),
+		},
 	}
 }

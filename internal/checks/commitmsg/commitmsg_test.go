@@ -1,0 +1,85 @@
+// Copyright Thesmos B.V. 2026
+// SPDX-License-Identifier: MIT
+
+package commitmsg
+
+import (
+	"errors"
+	"strings"
+	"testing"
+)
+
+// TestValidate pins the contract of [Validate]: accepts the
+// standard Conventional Commits shape, rejects each documented
+// failure with a specific sentinel.
+func TestValidate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("canonical subject passes", func(t *testing.T) {
+		t.Parallel()
+		err := Validate("feat: add new flag", Defaults())
+		if err != nil {
+			t.Fatalf("Validate err: %v", err)
+		}
+	})
+
+	t.Run("scoped subject passes", func(t *testing.T) {
+		t.Parallel()
+		err := Validate("fix(parser): handle EOF", Defaults())
+		if err != nil {
+			t.Fatalf("Validate err: %v", err)
+		}
+	})
+
+	t.Run("multi-line message validates the first line", func(t *testing.T) {
+		t.Parallel()
+		body := "feat: add flag\n\nLong-form description goes here."
+		if err := Validate(body, Defaults()); err != nil {
+			t.Fatalf("Validate err: %v", err)
+		}
+	})
+
+	t.Run("missing colon is ErrInvalidFormat", func(t *testing.T) {
+		t.Parallel()
+		err := Validate("feat add flag", Defaults())
+		if !errors.Is(err, ErrInvalidFormat) {
+			t.Fatalf("err = %v, want ErrInvalidFormat", err)
+		}
+	})
+
+	t.Run("unknown type is ErrUnknownType", func(t *testing.T) {
+		t.Parallel()
+		err := Validate("wat: weird type", Defaults())
+		if !errors.Is(err, ErrUnknownType) {
+			t.Fatalf("err = %v, want ErrUnknownType", err)
+		}
+	})
+
+	t.Run("over-length subject is ErrSubjectTooLong", func(t *testing.T) {
+		t.Parallel()
+		long := "feat: " + strings.Repeat("x", 80)
+		err := Validate(long, Defaults())
+		if !errors.Is(err, ErrSubjectTooLong) {
+			t.Fatalf("err = %v, want ErrSubjectTooLong", err)
+		}
+	})
+
+	t.Run("trailing period is ErrTrailingPeriod", func(t *testing.T) {
+		t.Parallel()
+		err := Validate("feat: add flag.", Defaults())
+		if !errors.Is(err, ErrTrailingPeriod) {
+			t.Fatalf("err = %v, want ErrTrailingPeriod", err)
+		}
+	})
+
+	t.Run("custom types override the defaults", func(t *testing.T) {
+		t.Parallel()
+		cfg := Config{Types: []string{"wip"}, MaxSubjectLength: 72}
+		if err := Validate("wip: trying things", cfg); err != nil {
+			t.Fatalf("Validate err: %v, want wip to be accepted", err)
+		}
+		if err := Validate("feat: add flag", cfg); !errors.Is(err, ErrUnknownType) {
+			t.Fatalf("err = %v, want feat to be rejected for this Config", err)
+		}
+	})
+}
