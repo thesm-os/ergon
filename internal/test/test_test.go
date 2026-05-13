@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/modules"
@@ -34,7 +35,8 @@ func TestRun(t *testing.T) {
 			CoverageDir: t.TempDir(),
 		}
 
-		if err := Run(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), stage.Options{}); err != nil {
+		err := Run(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), Override{}, stage.Options{})
+		if err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
 		if len(runner.calls) != 2 {
@@ -71,7 +73,8 @@ func TestRun(t *testing.T) {
 		runner := &fakeRunner{}
 		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}}}
 
-		if err := Run(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), stage.Options{}); err != nil {
+		err := Run(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), Override{}, stage.Options{})
+		if err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
 		for _, a := range runner.calls[0].args {
@@ -79,6 +82,81 @@ func TestRun(t *testing.T) {
 				t.Fatalf("unexpected coverprofile flag: %q", a)
 			}
 		}
+	})
+}
+
+// TestRunOverride pins the [Override] semantics on [Run]: zero
+// fields keep the configured value, non-zero fields shadow it,
+// and a non-empty Pattern adds `-run=<pattern>`.
+func TestRunOverride(t *testing.T) {
+	t.Parallel()
+
+	t.Run("override count/cpu/timeout shadow the configured values", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{}
+		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}}}
+		ov := Override{
+			Count:   1,
+			CPU:     2,
+			Timeout: 30 * time.Second,
+			Pattern: "TestFoo",
+		}
+		err := Run(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), ov, stage.Options{})
+		if err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		assertContainsAll(t, runner.calls[0].args, []string{
+			"-count=1", "-cpu=2", "-timeout=30s", "-run=TestFoo",
+		})
+	})
+
+	t.Run("zero-valued override keeps the configured defaults", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{}
+		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}}}
+		err := Run(
+			t.Context(),
+			runner,
+			io.Discard,
+			io.Discard,
+			in,
+			Defaults(),
+			Override{},
+			stage.Options{},
+		)
+		if err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		assertContainsAll(t, runner.calls[0].args, []string{
+			"-count=3", "-cpu=4", "-timeout=10m0s",
+		})
+		for _, a := range runner.calls[0].args {
+			if strings.HasPrefix(a, "-run=") {
+				t.Fatalf("unexpected -run flag with zero Pattern: %q", a)
+			}
+		}
+	})
+}
+
+// TestBenchOverride pins the [Override] semantics on [Bench]:
+// Pattern feeds `-bench`, Count maps to BenchCount, Time becomes
+// `-benchtime`.
+func TestBenchOverride(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeRunner{}
+	in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}}}
+	ov := Override{
+		Pattern: "BenchmarkFoo",
+		Count:   2,
+		Time:    3 * time.Second,
+	}
+	err := Bench(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), ov, stage.Options{})
+	if err != nil {
+		t.Fatalf("Bench err: %v", err)
+	}
+	assertContainsAll(t, runner.calls[0].args, []string{
+		"-bench=BenchmarkFoo", "-count=2", "-benchtime=3s",
 	})
 }
 
@@ -91,7 +169,8 @@ func TestRace(t *testing.T) {
 		runner := &fakeRunner{}
 		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "cli"}}}
 
-		if err := Race(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), stage.Options{}); err != nil {
+		err := Race(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), Override{}, stage.Options{})
+		if err != nil {
 			t.Fatalf("Race err: %v", err)
 		}
 		assertContainsAll(t, runner.calls[0].args, []string{
@@ -109,7 +188,8 @@ func TestBench(t *testing.T) {
 		runner := &fakeRunner{}
 		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}}}
 
-		if err := Bench(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), stage.Options{}); err != nil {
+		err := Bench(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), Override{}, stage.Options{})
+		if err != nil {
 			t.Fatalf("Bench err: %v", err)
 		}
 		assertContainsAll(t, runner.calls[0].args, []string{
@@ -173,7 +253,7 @@ func TestFuzz(t *testing.T) {
 		runner := &fakeRunner{}
 
 		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
-		if err := Fuzz(t.Context(), runner, io.Discard, io.Discard, in, Defaults()); err != nil {
+		if err := Fuzz(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), Override{}); err != nil {
 			t.Fatalf("Fuzz err: %v", err)
 		}
 		if len(runner.calls) != 2 {
@@ -198,7 +278,7 @@ func TestFuzz(t *testing.T) {
 
 		var stdout strings.Builder
 		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
-		if err := Fuzz(t.Context(), runner, &stdout, io.Discard, in, Defaults()); err != nil {
+		if err := Fuzz(t.Context(), runner, &stdout, io.Discard, in, Defaults(), Override{}); err != nil {
 			t.Fatalf("Fuzz err: %v", err)
 		}
 		if len(runner.calls) != 0 {
@@ -218,7 +298,7 @@ func TestFuzz(t *testing.T) {
 		runner := &fakeRunner{runErr: errors.New("crash")}
 
 		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
-		err := Fuzz(t.Context(), runner, io.Discard, io.Discard, in, Defaults())
+		err := Fuzz(t.Context(), runner, io.Discard, io.Discard, in, Defaults(), Override{})
 		if err == nil {
 			t.Fatal("Fuzz returned nil, want error")
 		}

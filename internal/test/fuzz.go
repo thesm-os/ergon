@@ -29,35 +29,59 @@ type FuzzTarget struct {
 }
 
 // Fuzz discovers every Fuzz* target across the given modules and
-// runs each sequentially for cfg.FuzzTime via
+// runs each sequentially via
 // `go test -run=^$ -fuzz=^Name$ -fuzztime=...`. Discovery is
-// source-level (no compilation) so a syntactically valid test file
-// is enough to register a target.
+// source-level (no compilation) so a syntactically valid test
+// file is enough to register a target.
 //
-// First-failure short-circuits; the offending target is named in
-// the wrapped error.
+// ov shadows cfg for this invocation. ov.Pattern, when set, is a
+// regex matched against discovered target names so a single Fuzz
+// target (or a subset) can be exercised; ov.Time becomes
+// `-fuzztime`; ov.Timeout becomes `-timeout`. First-failure
+// short-circuits; the offending target is named in the wrapped
+// error.
 func Fuzz(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
-	in Inputs, cfg Config,
+	in Inputs, cfg Config, ov Override,
 ) error {
 	targets, err := DiscoverFuzzTargets(in.Root, in.Modules)
 	if err != nil {
 		return fmt.Errorf("discover fuzz targets: %w", err)
 	}
+	if ov.Pattern != "" {
+		re, err := regexp.Compile(ov.Pattern)
+		if err != nil {
+			return fmt.Errorf("fuzz pattern %q: %w", ov.Pattern, err)
+		}
+		filtered := targets[:0]
+		for _, t := range targets {
+			if re.MatchString(t.Name) {
+				filtered = append(filtered, t)
+			}
+		}
+		targets = filtered
+	}
 	if len(targets) == 0 {
 		fmt.Fprintln(stdout, "no fuzz targets found")
 		return nil
 	}
+	fuzzTime := pickDuration(ov.Time, cfg.FuzzTime)
 	for _, t := range targets {
 		fmt.Fprintf(stdout, "[%s] fuzz %s in %s\n", t.Module.Dir, t.Name, t.PkgRel)
+		args := []string{
+			"test",
+			"-run=^$",
+			"-fuzz=^" + t.Name + "$",
+			"-fuzztime=" + fuzzTime.String(),
+		}
+		if ov.Timeout > 0 {
+			args = append(args, "-timeout="+ov.Timeout.String())
+		}
+		args = append(args, t.PkgRel)
 		err := runner.Run(
 			ctx,
 			optsFor(in.Root, t.Module, stdout, stderr),
-			"go", "test",
-			"-run=^$",
-			"-fuzz=^"+t.Name+"$",
-			"-fuzztime="+cfg.FuzzTime.String(),
-			t.PkgRel,
+			"go", args...,
 		)
 		if err != nil {
 			return fmt.Errorf("[%s] fuzz %s: %w", t.Module.Dir, t.Name, err)

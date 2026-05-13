@@ -103,7 +103,9 @@ var checkCmd = &cobra.Command{
 				return lint.All(ctx, runner, stdout, stderr,
 					lint.Inputs{Root: root, Modules: mods}, cfg.Markdown, cfg.License, opts)
 			}},
-			{"test", func() error { return test.Run(ctx, runner, stdout, stderr, in, cfg.Test, opts) }},
+			{"test", func() error {
+				return test.Run(ctx, runner, stdout, stderr, in, cfg.Test, test.Override{}, opts)
+			}},
 			{"coverage", func() error {
 				return coverage.Run(ctx, runner, stdout, stderr,
 					root, coverageDir, importPath+"/", cfg.Checks.Coverage,

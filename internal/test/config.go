@@ -59,3 +59,40 @@ func Defaults() Config {
 		FuzzTime:   30 * time.Second,
 	}
 }
+
+// Override carries the per-invocation CLI flag values the cobra
+// layer passes through to each `test` subcommand. Zero values
+// mean "use the [Config] default"; non-zero values shadow the
+// configured field for this run only.
+//
+// Pattern has no config equivalent — it lives here because it is
+// intrinsically per-invocation (which tests / benchmarks / fuzz
+// targets you want to exercise *right now*). The other fields
+// mirror the same-named [Config] field, except Count which maps
+// to the per-command count (Count / RaceCount / BenchCount).
+type Override struct {
+	// Pattern is the `-run` regex (for Run / Race), the `-bench`
+	// regex (for Bench), or the Fuzz-target name regex (for
+	// Fuzz). Empty means: use the per-command default (no -run
+	// for Run / Race; "." for Bench; match-every-target for
+	// Fuzz).
+	Pattern string
+
+	// Count overrides the per-command count (Count, RaceCount, or
+	// BenchCount). Zero leaves the configured value in place.
+	Count int
+
+	// CPU overrides [Config.CPU]. Zero leaves the configured
+	// value in place.
+	CPU int
+
+	// Timeout overrides [Config.Timeout]. Zero leaves the
+	// configured value in place.
+	Timeout time.Duration
+
+	// Time overrides [Config.FuzzTime] for `ergon test fuzz`
+	// or feeds `-benchtime` for `ergon test bench`. Zero leaves
+	// the configured value in place (and omits `-benchtime`
+	// entirely for Bench, which makes Go use its own 1s default).
+	Time time.Duration
+}

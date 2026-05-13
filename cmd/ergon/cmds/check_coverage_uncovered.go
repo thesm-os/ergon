@@ -63,6 +63,7 @@ var checkCoverageUncoveredCmd = &cobra.Command{
 func init() {
 	checkCoverageUncoveredCmd.Flags().BoolVar(
 		&checkCoverageUncoveredFlags.all, "all", false,
-		"Skip the policy filters and show every uncovered block")
+		"Skip the policy filters and show every uncovered block",
+	)
 	checkCoverageCmd.AddCommand(checkCoverageUncoveredCmd)
 }
