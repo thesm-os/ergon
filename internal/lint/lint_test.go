@@ -17,6 +17,7 @@ import (
 	"go.thesmos.sh/ergon/internal/license"
 	"go.thesmos.sh/ergon/internal/markdown"
 	"go.thesmos.sh/ergon/internal/modules"
+	"go.thesmos.sh/ergon/internal/stage"
 )
 
 // TestVet pins the per-module `go vet ./...` shape.
@@ -28,7 +29,7 @@ func TestVet(t *testing.T) {
 		runner := &fakeRunner{}
 		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}, {Dir: "cli"}}}
 
-		if err := Vet(t.Context(), runner, io.Discard, io.Discard, in, false); err != nil {
+		if err := Vet(t.Context(), runner, io.Discard, io.Discard, in, stage.Options{}); err != nil {
 			t.Fatalf("Vet err: %v", err)
 		}
 		want := []string{
@@ -43,7 +44,7 @@ func TestVet(t *testing.T) {
 		runner := &fakeRunner{runErr: errors.New("vet finding")}
 		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "cli"}}}
 
-		err := Vet(t.Context(), runner, io.Discard, io.Discard, in, false)
+		err := Vet(t.Context(), runner, io.Discard, io.Discard, in, stage.Options{})
 		if err == nil {
 			t.Fatal("Vet returned nil, want error")
 		}
@@ -55,9 +56,12 @@ func TestVet(t *testing.T) {
 	t.Run("default mode runs every module even when one fails", func(t *testing.T) {
 		t.Parallel()
 		runner := &fakeRunner{runErr: errors.New("vet finding")}
-		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}, {Dir: "cli"}, {Dir: "api"}}}
+		in := Inputs{
+			Root:    "/repo",
+			Modules: []modules.Module{{Dir: "."}, {Dir: "cli"}, {Dir: "api"}},
+		}
 
-		err := Vet(t.Context(), runner, io.Discard, io.Discard, in, false)
+		err := Vet(t.Context(), runner, io.Discard, io.Discard, in, stage.Options{})
 		if err == nil {
 			t.Fatal("Vet returned nil, want aggregated error")
 		}
@@ -69,9 +73,12 @@ func TestVet(t *testing.T) {
 	t.Run("fast mode aborts at the first failure", func(t *testing.T) {
 		t.Parallel()
 		runner := &fakeRunner{runErr: errors.New("vet finding")}
-		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}, {Dir: "cli"}, {Dir: "api"}}}
+		in := Inputs{
+			Root:    "/repo",
+			Modules: []modules.Module{{Dir: "."}, {Dir: "cli"}, {Dir: "api"}},
+		}
 
-		err := Vet(t.Context(), runner, io.Discard, io.Discard, in, true)
+		err := Vet(t.Context(), runner, io.Discard, io.Discard, in, stage.Options{Fast: true})
 		if err == nil {
 			t.Fatal("Vet returned nil, want error")
 		}
@@ -91,7 +98,7 @@ func TestGo(t *testing.T) {
 		runner := &fakeRunner{}
 		in := Inputs{Root: "/repo", Modules: []modules.Module{{Dir: "."}}}
 
-		if err := Go(t.Context(), runner, io.Discard, io.Discard, in, false); err != nil {
+		if err := Go(t.Context(), runner, io.Discard, io.Discard, in, stage.Options{}); err != nil {
 			t.Fatalf("Go err: %v", err)
 		}
 		assertCalls(t, runner.calls, []string{"/repo: golangci-lint run ./..."})
@@ -110,7 +117,16 @@ func TestAll(t *testing.T) {
 		runner := &fakeRunner{}
 
 		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
-		err := All(t.Context(), runner, io.Discard, io.Discard, in, markdown.Defaults(), license.Defaults(), false)
+		err := All(
+			t.Context(),
+			runner,
+			io.Discard,
+			io.Discard,
+			in,
+			markdown.Defaults(),
+			license.Defaults(),
+			stage.Options{},
+		)
 		if err != nil {
 			t.Fatalf("All err: %v", err)
 		}
@@ -132,7 +148,16 @@ func TestAll(t *testing.T) {
 		}}
 
 		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
-		err := All(t.Context(), runner, io.Discard, io.Discard, in, markdown.Defaults(), license.Defaults(), false)
+		err := All(
+			t.Context(),
+			runner,
+			io.Discard,
+			io.Discard,
+			in,
+			markdown.Defaults(),
+			license.Defaults(),
+			stage.Options{},
+		)
 		if err == nil {
 			t.Fatal("All returned nil, want aggregated vet error")
 		}
@@ -155,12 +180,24 @@ func TestAll(t *testing.T) {
 		}}
 
 		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
-		err := All(t.Context(), runner, io.Discard, io.Discard, in, markdown.Defaults(), license.Defaults(), true)
+		err := All(
+			t.Context(),
+			runner,
+			io.Discard,
+			io.Discard,
+			in,
+			markdown.Defaults(),
+			license.Defaults(),
+			stage.Options{Fast: true},
+		)
 		if err == nil {
 			t.Fatal("All returned nil, want vet error")
 		}
+		postVet := map[string]bool{
+			"golangci-lint": true, "markdownlint-cli2": true, "go-license": true,
+		}
 		for _, c := range runner.calls {
-			if c.name == "golangci-lint" || c.name == "markdownlint-cli2" || c.name == "go-license" {
+			if postVet[c.name] {
 				t.Fatalf("unexpected post-vet call: %q (fast mode should abort)", c.name)
 			}
 		}

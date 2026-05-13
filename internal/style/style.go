@@ -158,11 +158,22 @@ type StageResult struct {
 	// verdict (e.g. an error summary, a skip reason, a finding
 	// count). Empty omits the annotation.
 	Note string
+
+	// Output is the captured tool output (stdout+stderr) that
+	// produced the failure. When non-empty AND Err is non-nil the
+	// summary renders it indented + dimmed beneath the failing
+	// verdict line so the user sees the finding without having
+	// to rerun in verbose mode. Empty for pass / skip and in
+	// verbose mode (where the bytes already streamed live).
+	Output string
 }
 
 // Summary writes the closing block of a stage: per-target verdict
 // lines followed by an aggregate PASS/FAIL line. Labels are
-// right-padded so the verdicts line up.
+// right-padded so the verdicts line up; failing entries that
+// carry captured tool output have that output indented + dimmed
+// beneath the verdict line so users see the finding without
+// having to rerun in verbose mode.
 //
 // passMessage and failMessage are the human-facing summaries the
 // aggregate line carries — typically "every target passed" and
@@ -189,6 +200,9 @@ func (s Style) Summary(w io.Writer, results []StageResult, passMessage, failMess
 		default:
 			failed++
 			fmt.Fprintf(w, "  %s   %s%s\n", label, s.Fail(), resultSuffix(r))
+			if body := strings.TrimRight(r.Output, "\n"); body != "" {
+				fmt.Fprintln(w, s.Dimmed(Indent(body, "      ")))
+			}
 		}
 	}
 	fmt.Fprintln(w)

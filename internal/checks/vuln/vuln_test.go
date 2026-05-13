@@ -13,6 +13,7 @@ import (
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/modules"
+	"go.thesmos.sh/ergon/internal/stage"
 )
 
 // TestRun pins the per-module `govulncheck ./...` invocation shape
@@ -25,7 +26,7 @@ func TestRun(t *testing.T) {
 		runner := &fakeRunner{}
 
 		err := Run(t.Context(), runner, io.Discard, io.Discard, "/repo",
-			[]modules.Module{{Dir: "."}, {Dir: "cli"}}, false)
+			[]modules.Module{{Dir: "."}, {Dir: "cli"}}, stage.Options{})
 		if err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
@@ -40,7 +41,7 @@ func TestRun(t *testing.T) {
 		runner := &fakeRunner{runErr: errors.New("reachable vuln")}
 
 		err := Run(t.Context(), runner, io.Discard, io.Discard, "/repo",
-			[]modules.Module{{Dir: "cli"}, {Dir: "later"}}, false)
+			[]modules.Module{{Dir: "cli"}, {Dir: "later"}}, stage.Options{})
 		if err == nil {
 			t.Fatal("Run returned nil, want aggregated error")
 		}
@@ -57,7 +58,7 @@ func TestRun(t *testing.T) {
 		runner := &fakeRunner{runErr: errors.New("reachable vuln")}
 
 		err := Run(t.Context(), runner, io.Discard, io.Discard, "/repo",
-			[]modules.Module{{Dir: "cli"}, {Dir: "later"}}, true)
+			[]modules.Module{{Dir: "cli"}, {Dir: "later"}}, stage.Options{Fast: true})
 		if err == nil {
 			t.Fatal("Run returned nil, want error")
 		}

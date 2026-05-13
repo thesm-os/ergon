@@ -14,8 +14,9 @@ import (
 )
 
 // coverageVerbose toggles the "Uncovered ranges" dump in the
-// per-target report. Bound to `-v` / `--verbose` on
-// [checkCoverageCmd].
+// per-target report. Bound to `--ranges` on [checkCoverageCmd];
+// the root `-v / --verbose` flag is reserved for the
+// stream-vs-buffer toggle so it carries its own name here.
 var coverageVerbose bool
 
 // checkCoverageCmd is `ergon check coverage`. Reads the
@@ -35,7 +36,7 @@ var checkCoverageCmd = &cobra.Command{
 		"profiles produced by `ergon test`, runs `go tool cover -func`, " +
 		"and fails any function below its layer's minimum coverage.\n\n" +
 		"Positional arguments restrict the run to specific layer prefixes; " +
-		"with none, every configured layer is exercised. The -v flag " +
+		"with none, every configured layer is exercised. The --ranges flag " +
 		"appends the uncovered block ranges for every failing target.",
 	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -62,7 +63,7 @@ var checkCoverageCmd = &cobra.Command{
 }
 
 func init() {
-	checkCoverageCmd.Flags().BoolVarP(&coverageVerbose, "verbose", "v", false,
+	checkCoverageCmd.Flags().BoolVar(&coverageVerbose, "ranges", false,
 		"dump uncovered block ranges (file:start-end (stmts)) for every failing target")
 	checkCmd.AddCommand(checkCoverageCmd)
 }

@@ -12,8 +12,9 @@ import (
 )
 
 // mutationVerbose toggles the "Non-killed mutants" dump in the
-// per-target report. Bound to `-v` / `--verbose` on
-// [checkMutationCmd].
+// per-target report. Bound to `--mutants` on [checkMutationCmd];
+// the root `-v / --verbose` flag is reserved for the
+// stream-vs-buffer toggle so it carries its own name here.
 var mutationVerbose bool
 
 // checkMutationCmd is `ergon check mutation`. Iterates every
@@ -34,8 +35,8 @@ var checkMutationCmd = &cobra.Command{
 		"Positional arguments restrict the run to specific targets. Each " +
 		"argument is either `<layer>` or `<layer>/<subpath>`; the layer " +
 		"prefix selects the threshold entry. With no args every declared " +
-		"layer is exercised. The -v flag dumps every non-killed mutant " +
-		"for failing targets so editors can jump to file:line:col.",
+		"layer is exercised. The --mutants flag dumps every non-killed " +
+		"mutant for failing targets so editors can jump to file:line:col.",
 	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
@@ -52,7 +53,7 @@ var checkMutationCmd = &cobra.Command{
 }
 
 func init() {
-	checkMutationCmd.Flags().BoolVarP(&mutationVerbose, "verbose", "v", false,
+	checkMutationCmd.Flags().BoolVar(&mutationVerbose, "mutants", false,
 		"dump every non-killed mutant (file:line:col) for every failing target")
 	checkCmd.AddCommand(checkMutationCmd)
 }

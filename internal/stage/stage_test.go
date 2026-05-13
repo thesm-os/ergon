@@ -26,14 +26,14 @@ func TestPerModule(t *testing.T) {
 		var visited []string
 		var stdout strings.Builder
 		err := PerModule(t.Context(), &stdout,
-			[]modules.Module{{Dir: "a"}, {Dir: "b"}, {Dir: "c"}}, false,
+			[]modules.Module{{Dir: "a"}, {Dir: "b"}, {Dir: "c"}}, Options{},
 			"my-stage", "test details",
-			func(_ context.Context, m modules.Module) (bool, error) {
+			func(_ context.Context, m modules.Module) StepResult {
 				visited = append(visited, m.Dir)
 				if m.Dir == "b" {
-					return false, errors.New("middle fail")
+					return StepResult{Err: errors.New("middle fail")}
 				}
-				return false, nil
+				return StepResult{}
 			})
 		if err == nil {
 			t.Fatal("PerModule returned nil, want aggregated error")
@@ -51,14 +51,14 @@ func TestPerModule(t *testing.T) {
 		var visited []string
 		var stdout strings.Builder
 		err := PerModule(t.Context(), &stdout,
-			[]modules.Module{{Dir: "a"}, {Dir: "b"}, {Dir: "c"}}, true,
+			[]modules.Module{{Dir: "a"}, {Dir: "b"}, {Dir: "c"}}, Options{Fast: true},
 			"my-stage", "test details",
-			func(_ context.Context, m modules.Module) (bool, error) {
+			func(_ context.Context, m modules.Module) StepResult {
 				visited = append(visited, m.Dir)
 				if m.Dir == "b" {
-					return false, errors.New("middle fail")
+					return StepResult{Err: errors.New("middle fail")}
 				}
-				return false, nil
+				return StepResult{}
 			})
 		if err == nil {
 			t.Fatal("PerModule returned nil, want error")
@@ -72,10 +72,10 @@ func TestPerModule(t *testing.T) {
 		t.Parallel()
 		var stdout strings.Builder
 		err := PerModule(t.Context(), &stdout,
-			[]modules.Module{{Dir: "."}}, false,
+			[]modules.Module{{Dir: "."}}, Options{},
 			"my-stage", "test details",
-			func(_ context.Context, _ modules.Module) (bool, error) {
-				return false, nil
+			func(_ context.Context, _ modules.Module) StepResult {
+				return StepResult{}
 			})
 		if err != nil {
 			t.Fatalf("PerModule err: %v", err)
@@ -92,10 +92,10 @@ func TestPerModule(t *testing.T) {
 		t.Parallel()
 		var stdout strings.Builder
 		err := PerModule(t.Context(), &stdout,
-			[]modules.Module{{Dir: "tests"}}, false,
+			[]modules.Module{{Dir: "tests"}}, Options{},
 			"my-stage", "test details",
-			func(_ context.Context, _ modules.Module) (bool, error) {
-				return true, nil
+			func(_ context.Context, _ modules.Module) StepResult {
+				return StepResult{Skipped: true}
 			})
 		if err != nil {
 			t.Fatalf("PerModule err: %v, want nil for a pure skip", err)
@@ -104,75 +104,117 @@ func TestPerModule(t *testing.T) {
 			t.Fatalf("stdout missing skip note: %q", stdout.String())
 		}
 	})
+
+	t.Run("captured tool output is rendered under the failing verdict", func(t *testing.T) {
+		t.Parallel()
+		var stdout strings.Builder
+		_ = PerModule(t.Context(), &stdout,
+			[]modules.Module{{Dir: "a"}}, Options{},
+			"my-stage", "details",
+			func(_ context.Context, _ modules.Module) StepResult {
+				return StepResult{
+					Err:    errors.New("boom"),
+					Output: "line1\nline2\n",
+				}
+			})
+		body := stdout.String()
+		if !strings.Contains(body, "line1") || !strings.Contains(body, "line2") {
+			t.Fatalf("stdout missing captured output: %q", body)
+		}
+	})
 }
 
-// TestRunAllowSkip pins the wrapper: the underlying call's skip
-// notice flips skipped=true and is also tee'd through to the
-// notice writer; a real failure surfaces as a non-nil error with
-// skipped=false.
+// TestRunAllowSkip pins the capture-vs-stream contract: the skip
+// signal demotes failures regardless of mode; buffered mode keeps
+// stdout silent and returns Output on failure; verbose mode
+// streams output live and leaves Output empty.
 func TestRunAllowSkip(t *testing.T) {
 	t.Parallel()
 
-	t.Run("`matched no packages` signal returns skipped=true", func(t *testing.T) {
+	t.Run("buffered mode (no `matched no packages`) returns Output on failure", func(t *testing.T) {
 		t.Parallel()
 		runner := &fakeRunner{
-			stderrOut: `go: warning: "./..." matched no packages` + "\n",
+			stdoutOut: "vet finding here\n",
 			err:       errors.New("exit status 1"),
 		}
 		var notice strings.Builder
-		skipped, err := RunAllowSkip(t.Context(), runner,
-			xexec.Options{Stderr: io.Discard},
-			&notice, "tests", "go", "vet", "./...")
-		if err != nil {
-			t.Fatalf("err = %v, want nil after demotion", err)
+		r := RunAllowSkip(t.Context(), runner, Options{}, "/dir", "core",
+			io.Discard, io.Discard, &notice, "go", "vet", "./...")
+		if r.Err == nil {
+			t.Fatal("err = nil, want failure")
 		}
-		if !skipped {
-			t.Fatal("skipped = false, want true")
+		if !strings.Contains(r.Output, "vet finding here") {
+			t.Fatalf("Output = %q, want captured stdout", r.Output)
 		}
-		if !strings.Contains(notice.String(), "[tests]") {
-			t.Fatalf("notice = %q, want skip line tee'd through", notice.String())
-		}
-	})
-
-	t.Run("clean success returns skipped=false, err=nil", func(t *testing.T) {
-		t.Parallel()
-		runner := &fakeRunner{}
-		skipped, err := RunAllowSkip(t.Context(), runner,
-			xexec.Options{Stderr: io.Discard}, io.Discard,
-			"core", "go", "vet", "./...")
-		if err != nil || skipped {
-			t.Fatalf("got (skipped=%v, err=%v), want (false, nil)", skipped, err)
+		if r.Skipped {
+			t.Fatal("Skipped = true for a real failure")
 		}
 	})
 
-	t.Run("real failure surfaces unchanged with skipped=false", func(t *testing.T) {
+	t.Run("buffered mode drops captured output on success", func(t *testing.T) {
 		t.Parallel()
-		want := errors.New("vet found issues")
-		runner := &fakeRunner{
-			stderrOut: "real error not the no-packages one\n",
-			err:       want,
+		runner := &fakeRunner{stdoutOut: "everything OK"}
+		r := RunAllowSkip(t.Context(), runner, Options{}, "/dir", "core",
+			io.Discard, io.Discard, io.Discard, "go", "vet", "./...")
+		if r.Err != nil || r.Output != "" || r.Skipped {
+			t.Fatalf("got %+v, want zero StepResult", r)
 		}
-		skipped, err := RunAllowSkip(t.Context(), runner,
-			xexec.Options{Stderr: io.Discard}, io.Discard,
-			"core", "go", "vet", "./...")
-		if !errors.Is(err, want) {
-			t.Fatalf("err = %v, want propagation", err)
+	})
+
+	t.Run("`matched no packages` signal demotes failure to skip in both modes", func(t *testing.T) {
+		t.Parallel()
+		for _, opts := range []Options{{}, {Verbose: true}} {
+			runner := &fakeRunner{
+				stderrOut: `go: warning: "./..." matched no packages` + "\n",
+				err:       errors.New("exit status 1"),
+			}
+			var notice strings.Builder
+			r := RunAllowSkip(t.Context(), runner, opts, "/dir", "tests",
+				io.Discard, io.Discard, &notice, "go", "vet", "./...")
+			if r.Err != nil {
+				t.Fatalf("verbose=%v: err = %v, want nil", opts.Verbose, r.Err)
+			}
+			if !r.Skipped {
+				t.Fatalf("verbose=%v: Skipped = false, want true", opts.Verbose)
+			}
+			if !strings.Contains(notice.String(), "[tests]") {
+				t.Fatalf("verbose=%v: notice = %q, want skip line", opts.Verbose, notice.String())
+			}
 		}
-		if skipped {
-			t.Fatal("skipped = true for a real failure")
+	})
+
+	t.Run("verbose mode streams output and leaves Output empty", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{stdoutOut: "live output\n"}
+		var liveOut strings.Builder
+		r := RunAllowSkip(t.Context(), runner, Options{Verbose: true}, "/dir", "core",
+			&liveOut, io.Discard, io.Discard, "go", "vet", "./...")
+		if r.Err != nil {
+			t.Fatalf("err = %v, want nil", r.Err)
+		}
+		if r.Output != "" {
+			t.Fatalf("Output = %q, want empty in verbose mode", r.Output)
+		}
+		if !strings.Contains(liveOut.String(), "live output") {
+			t.Fatalf("verbose stdout did not receive bytes: %q", liveOut.String())
 		}
 	})
 }
 
 // fakeRunner satisfies [xexec.Runner] for the stage tests. It
-// writes stderrOut to opts.Stderr when non-nil and returns err
+// writes stdoutOut to opts.Stdout and stderrOut to opts.Stderr
+// (each only when the destination is non-nil) and returns err
 // verbatim.
 type fakeRunner struct {
+	stdoutOut string
 	stderrOut string
 	err       error
 }
 
 func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, _ string, _ ...string) error {
+	if opts.Stdout != nil && f.stdoutOut != "" {
+		_, _ = opts.Stdout.Write([]byte(f.stdoutOut))
+	}
 	if opts.Stderr != nil && f.stderrOut != "" {
 		_, _ = opts.Stderr.Write([]byte(f.stderrOut))
 	}

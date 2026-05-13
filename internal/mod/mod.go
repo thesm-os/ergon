@@ -32,26 +32,24 @@ var ErrDirty = errors.New("mod: uncommitted go.mod/go.sum changes after `go mod 
 // Makefile templates — download fills the module cache, verify
 // confirms checksums match `go.sum`.
 //
-// When fast is true the run aborts at the first per-module
+// When opts.Fast is true the run aborts at the first per-module
 // failure; otherwise every module runs and a single summary block
-// closes the stage.
+// closes the stage. opts.Verbose streams the raw `go mod` output.
 func Install(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
-	root string, mods []modules.Module, fast bool,
+	root string, mods []modules.Module, opts stage.Options,
 ) error {
-	return stage.PerModule(ctx, stdout, mods, fast,
+	return stage.PerModule(ctx, stdout, mods, opts,
 		"go mod install", "download + verify module cache",
-		func(ctx context.Context, m modules.Module) (bool, error) {
-			opts := xexec.Options{Dir: filepath.Join(root, m.Dir), Stdout: stdout, Stderr: stderr}
-			fmt.Fprintf(stdout, "[%s] go mod download\n", m.Dir)
-			if err := runner.Run(ctx, opts, "go", "mod", "download"); err != nil {
-				return false, fmt.Errorf("go mod download: %w", err)
+		func(ctx context.Context, m modules.Module) stage.StepResult {
+			dir := filepath.Join(root, m.Dir)
+			r := stage.RunAllowSkip(ctx, runner, opts, dir, m.Dir,
+				stdout, stderr, stdout, "go", "mod", "download")
+			if r.Err != nil || r.Skipped {
+				return r
 			}
-			fmt.Fprintf(stdout, "[%s] go mod verify\n", m.Dir)
-			if err := runner.Run(ctx, opts, "go", "mod", "verify"); err != nil {
-				return false, fmt.Errorf("go mod verify: %w", err)
-			}
-			return false, nil
+			return stage.RunAllowSkip(ctx, runner, opts, dir, m.Dir,
+				stdout, stderr, stdout, "go", "mod", "verify")
 		})
 }
 
@@ -59,22 +57,19 @@ func Install(
 // go.sum on disk per Go's tidy semantics — the caller is
 // responsible for committing the result.
 //
-// When fast is true the run aborts at the first per-module
+// When opts.Fast is true the run aborts at the first per-module
 // failure; otherwise every module runs and a single summary block
 // closes the stage.
 func Tidy(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
-	root string, mods []modules.Module, fast bool,
+	root string, mods []modules.Module, opts stage.Options,
 ) error {
-	return stage.PerModule(ctx, stdout, mods, fast,
+	return stage.PerModule(ctx, stdout, mods, opts,
 		"go mod tidy", "normalise go.mod and go.sum",
-		func(ctx context.Context, m modules.Module) (bool, error) {
-			opts := xexec.Options{Dir: filepath.Join(root, m.Dir), Stdout: stdout, Stderr: stderr}
-			fmt.Fprintf(stdout, "[%s] go mod tidy\n", m.Dir)
-			if err := runner.Run(ctx, opts, "go", "mod", "tidy"); err != nil {
-				return false, fmt.Errorf("go mod tidy: %w", err)
-			}
-			return false, nil
+		func(ctx context.Context, m modules.Module) stage.StepResult {
+			return stage.RunAllowSkip(ctx, runner, opts,
+				filepath.Join(root, m.Dir), m.Dir,
+				stdout, stderr, stdout, "go", "mod", "tidy")
 		})
 }
 
@@ -87,14 +82,14 @@ func Tidy(
 // `go mod tidy` is a precondition for merging, so divergence is a
 // CI-blocking finding rather than a silent drift.
 //
-// fast controls the underlying [Tidy] iteration; the diff check
+// opts controls the underlying [Tidy] iteration; the diff check
 // itself always aggregates (every module's status is reported
 // before the run returns).
 func Verify(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
-	root string, mods []modules.Module, fast bool,
+	root string, mods []modules.Module, opts stage.Options,
 ) error {
-	if err := Tidy(ctx, runner, stdout, stderr, root, mods, fast); err != nil {
+	if err := Tidy(ctx, runner, stdout, stderr, root, mods, opts); err != nil {
 		return err
 	}
 

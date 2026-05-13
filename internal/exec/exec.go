@@ -129,3 +129,13 @@ func matchesNoPackages(stderr []byte) bool {
 	}
 	return false
 }
+
+// IsNoPackagesSignal reports whether captured stderr (or combined
+// output) carries any of the well-known "matched no packages"
+// fragments the Go toolchain and golangci-lint emit when `./...`
+// resolves to an empty package set. Used by callers that invoke
+// runner.Run themselves but want the same soft-skip semantics
+// [RunAllowNoPackages] applies.
+func IsNoPackagesSignal(output []byte) bool {
+	return matchesNoPackages(output)
+}

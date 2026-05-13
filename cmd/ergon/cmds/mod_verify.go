@@ -27,7 +27,7 @@ var modVerifyCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return mod.Verify(cmd.Context(), xexec.Command{}, cmd.OutOrStdout(), cmd.ErrOrStderr(), root, mods, fastMode)
+		return mod.Verify(cmd.Context(), xexec.Command{}, cmd.OutOrStdout(), cmd.ErrOrStderr(), root, mods, stageOpts())
 	},
 }
 

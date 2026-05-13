@@ -39,22 +39,24 @@ type Inputs struct {
 // with the standard knobs (cpu, count, timeout) and writes a
 // per-module coverage profile when CoverageDir is set.
 //
-// When fast is true the run aborts at the first per-module
+// When opts.Fast is true the run aborts at the first per-module
 // failure; otherwise every module runs and a single summary block
 // closes the stage. A module whose packages are all gated out by
-// build tags is recorded as skipped.
+// build tags is recorded as skipped. opts.Verbose streams the
+// raw `go test` output instead of buffering it for failure-only
+// display.
 func Run(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
-	in Inputs, cfg Config, fast bool,
+	in Inputs, cfg Config, opts stage.Options,
 ) error {
 	if in.CoverageDir != "" {
 		if err := os.MkdirAll(in.CoverageDir, 0o700); err != nil {
 			return fmt.Errorf("create coverage dir: %w", err)
 		}
 	}
-	return stage.PerModule(ctx, stdout, in.Modules, fast,
+	return stage.PerModule(ctx, stdout, in.Modules, opts,
 		"go test", "unit tests + coverage",
-		func(ctx context.Context, m modules.Module) (bool, error) {
+		func(ctx context.Context, m modules.Module) stage.StepResult {
 			args := []string{
 				"test",
 				"-covermode=atomic",
@@ -66,9 +68,9 @@ func Run(
 				args = append(args, "-coverprofile="+coverageFile(in.CoverageDir, m))
 			}
 			args = append(args, "./...")
-			fmt.Fprintf(stdout, "[%s] go test ./...\n", m.Dir)
-			return stage.RunAllowSkip(ctx, runner, optsFor(in.Root, m, stdout, stderr),
-				stdout, m.Dir, "go", args...)
+			return stage.RunAllowSkip(ctx, runner, opts,
+				filepath.Join(in.Root, m.Dir), m.Dir,
+				stdout, stderr, stdout, "go", args...)
 		})
 }
 
@@ -78,16 +80,16 @@ func Run(
 // with the standard coverage run. A module whose packages are all
 // gated out by build tags is recorded as skipped.
 //
-// When fast is true the run aborts at the first per-module
+// When opts.Fast is true the run aborts at the first per-module
 // failure; otherwise every module runs and a single summary block
-// closes the stage.
+// closes the stage. opts.Verbose streams the raw output.
 func Race(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
-	in Inputs, cfg Config, fast bool,
+	in Inputs, cfg Config, opts stage.Options,
 ) error {
-	return stage.PerModule(ctx, stdout, in.Modules, fast,
+	return stage.PerModule(ctx, stdout, in.Modules, opts,
 		"go test -race", "race-detector run",
-		func(ctx context.Context, m modules.Module) (bool, error) {
+		func(ctx context.Context, m modules.Module) stage.StepResult {
 			args := []string{
 				"test",
 				"-race",
@@ -95,9 +97,9 @@ func Race(
 				"-timeout=" + cfg.Timeout.String(),
 				"./...",
 			}
-			fmt.Fprintf(stdout, "[%s] go test -race ./...\n", m.Dir)
-			return stage.RunAllowSkip(ctx, runner, optsFor(in.Root, m, stdout, stderr),
-				stdout, m.Dir, "go", args...)
+			return stage.RunAllowSkip(ctx, runner, opts,
+				filepath.Join(in.Root, m.Dir), m.Dir,
+				stdout, stderr, stdout, "go", args...)
 		})
 }
 
@@ -107,16 +109,16 @@ func Race(
 // with test results. A module whose packages are all gated out by
 // build tags is recorded as skipped.
 //
-// When fast is true the run aborts at the first per-module
+// When opts.Fast is true the run aborts at the first per-module
 // failure; otherwise every module runs and a single summary block
-// closes the stage.
+// closes the stage. opts.Verbose streams the raw bench output.
 func Bench(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
-	in Inputs, cfg Config, fast bool,
+	in Inputs, cfg Config, opts stage.Options,
 ) error {
-	return stage.PerModule(ctx, stdout, in.Modules, fast,
+	return stage.PerModule(ctx, stdout, in.Modules, opts,
 		"go test -bench", "benchmark run",
-		func(ctx context.Context, m modules.Module) (bool, error) {
+		func(ctx context.Context, m modules.Module) stage.StepResult {
 			args := []string{
 				"test",
 				"-bench=.",
@@ -125,15 +127,16 @@ func Bench(
 				"-timeout=" + cfg.Timeout.String(),
 				"./...",
 			}
-			fmt.Fprintf(stdout, "[%s] go test -bench=.\n", m.Dir)
-			return stage.RunAllowSkip(ctx, runner, optsFor(in.Root, m, stdout, stderr),
-				stdout, m.Dir, "go", args...)
+			return stage.RunAllowSkip(ctx, runner, opts,
+				filepath.Join(in.Root, m.Dir), m.Dir,
+				stdout, stderr, stdout, "go", args...)
 		})
 }
 
-// optsFor returns the [xexec.Options] for invoking `go test`
+// optsFor returns the [xexec.Options] for invoking a subprocess
 // inside module m: cwd is the module's absolute path, output is
-// streamed to the caller's writers.
+// streamed to the caller's writers. Used by [Fuzz] which does not
+// flow through [stage.PerModule].
 func optsFor(root string, m modules.Module, stdout, stderr io.Writer) xexec.Options {
 	return xexec.Options{
 		Dir:    filepath.Join(root, m.Dir),

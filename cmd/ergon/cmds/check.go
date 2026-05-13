@@ -18,9 +18,16 @@ import (
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/lint"
 	"go.thesmos.sh/ergon/internal/mod"
+	"go.thesmos.sh/ergon/internal/stage"
 	"go.thesmos.sh/ergon/internal/style"
 	"go.thesmos.sh/ergon/internal/test"
 )
+
+// stageOpts wraps the current root flags into the value
+// [stage.PerModule] and the gate subsystems expect.
+func stageOpts() stage.Options {
+	return stage.Options{Fast: fastMode, Verbose: verboseMode}
+}
 
 // checkCmd is `ergon check`. Bare invocation runs the full
 // pre-merge gate: mod verify → lint → test (which produces the
@@ -87,13 +94,14 @@ var checkCmd = &cobra.Command{
 			return err
 		}
 
+		opts := stageOpts()
 		stages := []checkStage{
-			{"mod", func() error { return mod.Verify(ctx, runner, stdout, stderr, root, mods, fastMode) }},
+			{"mod", func() error { return mod.Verify(ctx, runner, stdout, stderr, root, mods, opts) }},
 			{"lint", func() error {
 				return lint.All(ctx, runner, stdout, stderr,
-					lint.Inputs{Root: root, Modules: mods}, cfg.Markdown, cfg.License, fastMode)
+					lint.Inputs{Root: root, Modules: mods}, cfg.Markdown, cfg.License, opts)
 			}},
-			{"test", func() error { return test.Run(ctx, runner, stdout, stderr, in, cfg.Test, fastMode) }},
+			{"test", func() error { return test.Run(ctx, runner, stdout, stderr, in, cfg.Test, opts) }},
 			{"coverage", func() error {
 				return coverage.Run(ctx, runner, stdout, stderr,
 					root, coverageDir, importPath+"/", cfg.Checks.Coverage,
@@ -111,7 +119,7 @@ var checkCmd = &cobra.Command{
 				}
 				return errorprefix.Run(stdout, stderr, root, goFiles, cfg.Checks.ErrorPrefix)
 			}},
-			{"vuln", func() error { return vuln.Run(ctx, runner, stdout, stderr, root, mods, fastMode) }},
+			{"vuln", func() error { return vuln.Run(ctx, runner, stdout, stderr, root, mods, opts) }},
 		}
 
 		s := style.Detect(stdout)

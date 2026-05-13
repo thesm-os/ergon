@@ -30,7 +30,7 @@ var lintCmd = &cobra.Command{
 			cmd.Context(), xexec.Command{},
 			cmd.OutOrStdout(), cmd.ErrOrStderr(),
 			lint.Inputs{Root: root, Modules: mods},
-			cfg.Markdown, cfg.License, fastMode,
+			cfg.Markdown, cfg.License, stageOpts(),
 		)
 	},
 }

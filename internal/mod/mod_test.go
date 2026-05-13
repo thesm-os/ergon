@@ -12,6 +12,7 @@ import (
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/modules"
+	"go.thesmos.sh/ergon/internal/stage"
 )
 
 // TestInstall pins the per-module `go mod download` followed by
@@ -26,7 +27,7 @@ func TestInstall(t *testing.T) {
 		err := Install(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{
 			{Dir: "."},
 			{Dir: "cli"},
-		}, false)
+		}, stage.Options{})
 		if err != nil {
 			t.Fatalf("Install err: %v", err)
 		}
@@ -43,7 +44,15 @@ func TestInstall(t *testing.T) {
 		t.Parallel()
 		runner := &fakeRunner{runErr: errors.New("network down")}
 
-		err := Install(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{{Dir: "cli"}}, false)
+		err := Install(
+			t.Context(),
+			runner,
+			io.Discard,
+			io.Discard,
+			"/repo",
+			[]modules.Module{{Dir: "cli"}},
+			stage.Options{},
+		)
 		if err == nil {
 			t.Fatal("Install returned nil, want error")
 		}
@@ -65,7 +74,7 @@ func TestTidy(t *testing.T) {
 			{Dir: "."},
 			{Dir: "cli"},
 			{Dir: "frontend/golang"},
-		}, false)
+		}, stage.Options{})
 		if err != nil {
 			t.Fatalf("Tidy err: %v", err)
 		}
@@ -91,7 +100,7 @@ func TestVerify(t *testing.T) {
 		err := Verify(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{
 			{Dir: "."},
 			{Dir: "cli"},
-		}, false)
+		}, stage.Options{})
 		if err != nil {
 			t.Fatalf("Verify err: %v", err)
 		}
@@ -114,7 +123,7 @@ func TestVerify(t *testing.T) {
 		err := Verify(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{
 			{Dir: "."},
 			{Dir: "cli"},
-		}, false)
+		}, stage.Options{})
 		if !errors.Is(err, ErrDirty) {
 			t.Fatalf("Verify err = %v, want wrapped ErrDirty", err)
 		}
@@ -132,7 +141,15 @@ func TestVerify(t *testing.T) {
 			return nil
 		}}
 
-		err := Verify(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{{Dir: "."}}, false)
+		err := Verify(
+			t.Context(),
+			runner,
+			io.Discard,
+			io.Discard,
+			"/repo",
+			[]modules.Module{{Dir: "."}},
+			stage.Options{},
+		)
 		if errors.Is(err, ErrDirty) {
 			t.Fatalf("Verify err = %v, want a tidy failure, not ErrDirty", err)
 		}

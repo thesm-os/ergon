@@ -58,6 +58,15 @@ var cfgPath string
 // loop where one wants to fix the first failure and move on.
 var fastMode bool
 
+// verboseMode captures --verbose / -v. By default the gate
+// subsystems run the underlying tool with stdout/stderr captured
+// to a buffer; the buffer is shown only when the command fails,
+// indented and dimmed beneath the per-module verdict line. When
+// true, the raw tool output is streamed live as it always used to
+// be, so users can watch long-running operations (e.g. `go test`)
+// in real time.
+var verboseMode bool
+
 // init registers persistent flags on rootCmd. Subcommand files add
 // themselves to rootCmd from their own init() functions.
 func init() {
@@ -68,6 +77,10 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(
 		&fastMode, "fast", "f", false,
 		"fail-fast: stop at the first per-module or per-stage failure (default: run every target)",
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&verboseMode, "verbose", "v", false,
+		"stream the underlying tool's output live (default: buffered, revealed only on failure)",
 	)
 }
 

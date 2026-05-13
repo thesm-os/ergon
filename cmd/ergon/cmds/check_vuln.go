@@ -23,7 +23,7 @@ var checkVulnCmd = &cobra.Command{
 			return err
 		}
 		return vuln.Run(cmd.Context(), xexec.Command{},
-			cmd.OutOrStdout(), cmd.ErrOrStderr(), root, mods, fastMode)
+			cmd.OutOrStdout(), cmd.ErrOrStderr(), root, mods, stageOpts())
 	},
 }
 

@@ -44,14 +44,14 @@ type Inputs struct {
 }
 
 // All runs the four lint stages in order: [Vet], [Go],
-// markdown.Lint, license.Verify. When fast is false every stage
-// runs even if an earlier one failed; when true the first failure
-// aborts the run. The final aggregated error wraps every stage
-// that failed.
+// markdown.Lint, license.Verify. When opts.Fast is false every
+// stage runs even if an earlier one failed; when true the first
+// failure aborts the run. The final aggregated error wraps every
+// stage that failed.
 func All(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
 	in Inputs, markdownCfg markdown.Config, licenseCfg license.Config,
-	fast bool,
+	opts stage.Options,
 ) error {
 	s := style.Detect(stdout)
 	var failures []error
@@ -65,14 +65,14 @@ func All(
 		name string
 		run  func() error
 	}{
-		{"vet", func() error { return Vet(ctx, runner, stdout, stderr, in, fast) }},
-		{"go", func() error { return Go(ctx, runner, stdout, stderr, in, fast) }},
+		{"vet", func() error { return Vet(ctx, runner, stdout, stderr, in, opts) }},
+		{"go", func() error { return Go(ctx, runner, stdout, stderr, in, opts) }},
 		{"markdown", func() error { return markdown.Lint(ctx, runner, stdout, stderr, in.Root, markdownCfg) }},
 		{"license", func() error { return license.Verify(ctx, runner, stdout, stderr, in.Root, licenseCfg) }},
 	} {
 		err := st.run()
 		record(st.name, err)
-		if fast && err != nil {
+		if opts.Fast && err != nil {
 			break
 		}
 	}
@@ -89,23 +89,19 @@ func All(
 // all gated out by build tags is recorded as skipped rather than
 // failing the run.
 //
-// When fast is true the run aborts at the first per-module
+// When opts.Fast is true the run aborts at the first per-module
 // failure; otherwise every module runs and a single summary block
-// closes the stage.
+// closes the stage. opts.Verbose streams the raw tool output.
 func Vet(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
-	in Inputs, fast bool,
+	in Inputs, opts stage.Options,
 ) error {
-	return stage.PerModule(ctx, stdout, in.Modules, fast,
+	return stage.PerModule(ctx, stdout, in.Modules, opts,
 		"go vet", "static-analysis checks",
-		func(ctx context.Context, m modules.Module) (bool, error) {
-			opts := xexec.Options{
-				Dir:    filepath.Join(in.Root, m.Dir),
-				Stdout: stdout,
-				Stderr: stderr,
-			}
-			fmt.Fprintf(stdout, "[%s] go vet ./...\n", m.Dir)
-			return stage.RunAllowSkip(ctx, runner, opts, stdout, m.Dir, "go", "vet", "./...")
+		func(ctx context.Context, m modules.Module) stage.StepResult {
+			return stage.RunAllowSkip(ctx, runner, opts,
+				filepath.Join(in.Root, m.Dir), m.Dir,
+				stdout, stderr, stdout, "go", "vet", "./...")
 		})
 }
 
@@ -116,22 +112,18 @@ func Vet(
 // whose packages are all gated out by build tags is recorded as
 // skipped rather than failing the run.
 //
-// When fast is true the run aborts at the first per-module
+// When opts.Fast is true the run aborts at the first per-module
 // failure; otherwise every module runs and a single summary block
-// closes the stage.
+// closes the stage. opts.Verbose streams the raw tool output.
 func Go(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
-	in Inputs, fast bool,
+	in Inputs, opts stage.Options,
 ) error {
-	return stage.PerModule(ctx, stdout, in.Modules, fast,
+	return stage.PerModule(ctx, stdout, in.Modules, opts,
 		"golangci-lint", "configured linters",
-		func(ctx context.Context, m modules.Module) (bool, error) {
-			opts := xexec.Options{
-				Dir:    filepath.Join(in.Root, m.Dir),
-				Stdout: stdout,
-				Stderr: stderr,
-			}
-			fmt.Fprintf(stdout, "[%s] golangci-lint run\n", m.Dir)
-			return stage.RunAllowSkip(ctx, runner, opts, stdout, m.Dir, "golangci-lint", "run", "./...")
+		func(ctx context.Context, m modules.Module) stage.StepResult {
+			return stage.RunAllowSkip(ctx, runner, opts,
+				filepath.Join(in.Root, m.Dir), m.Dir,
+				stdout, stderr, stdout, "golangci-lint", "run", "./...")
 		})
 }
