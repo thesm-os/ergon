@@ -114,6 +114,21 @@ func Run(
 	return nil
 }
 
+// layerMatchPrefix normalises a layer-glob path into the prefix
+// the per-function classifier compares against repo-relative
+// paths. The empty string is the workspace-wide sentinel — every
+// row matches. `./...`, `./`, `.`, `...`, and the empty layer
+// path all flatten to that sentinel.
+func layerMatchPrefix(layerPath string) string {
+	p := strings.TrimSuffix(layerPath, "/...")
+	p = strings.TrimPrefix(p, "./")
+	p = strings.TrimSuffix(p, "/")
+	if p == "." || p == "..." {
+		return ""
+	}
+	return p
+}
+
 // sortedPrefixes returns imports sorted by descending ImportPath
 // length so [toRepoRelative] picks the most-specific module when
 // two share a prefix (e.g. `foo/proj` vs `foo/proj/cli`).
@@ -206,12 +221,17 @@ func longestPrefixLayer(packages []Layer, t string) (Layer, bool) {
 		bestLen = -1
 	)
 	for _, p := range packages {
-		base := strings.TrimSuffix(p.Path, "/...")
-		if base == t || strings.HasPrefix(t, base+"/") {
-			if len(base) > bestLen {
-				best = p
-				bestLen = len(base)
-			}
+		base := layerMatchPrefix(p.Path)
+		// A wildcard-everything layer (`./...`, `...`) carries the
+		// empty-string sentinel; treat it as a length-zero match
+		// so concrete layers always win when they overlap.
+		matches := base == "" || base == t || strings.HasPrefix(t, base+"/")
+		if !matches {
+			continue
+		}
+		if len(base) > bestLen {
+			best = p
+			bestLen = len(base)
 		}
 	}
 	return best, bestLen >= 0
@@ -226,8 +246,9 @@ func renderTarget(
 	skips []policy.Skip, prefixes []modules.Import, topN int, verbose bool,
 	mergedBody string,
 ) bool {
-	prefix := strings.TrimSuffix(layer.Path, "/...")
-	s.Header(stdout, prefix, fmt.Sprintf("line ≥ %d%%", layer.Line))
+	prefix := layerMatchPrefix(layer.Path)
+	header := strings.TrimSuffix(layer.Path, "/...")
+	s.Header(stdout, header, fmt.Sprintf("line ≥ %d%%", layer.Line))
 
 	var (
 		total, passing, failing, skipped, excluded int
@@ -235,7 +256,7 @@ func renderTarget(
 	)
 	for _, r := range rows {
 		rel := toRepoRelative(prefixes, r.Path)
-		if !strings.HasPrefix(rel, prefix+"/") && rel != prefix {
+		if prefix != "" && !strings.HasPrefix(rel, prefix+"/") && rel != prefix {
 			continue
 		}
 		total++
