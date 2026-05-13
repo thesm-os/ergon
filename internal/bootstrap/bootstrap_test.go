@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	xexec "go.thesmos.sh/ergon/internal/exec"
 )
 
 // TestRun pins the contract of [Run]: every default tool gets a
@@ -19,11 +21,13 @@ import (
 // when npm is available, and the absence of both surfaces as a
 // warning rather than an error.
 func TestRun(t *testing.T) {
-	t.Run("installs every default tool in declared order", func(t *testing.T) {
-		recorder, restore := stubExec(t, simulatePresent("markdownlint-cli2"))
-		defer restore()
+	t.Parallel()
 
-		err := Run(t.Context(), io.Discard, io.Discard, Config{})
+	t.Run("installs every default tool in declared order", func(t *testing.T) {
+		t.Parallel()
+		runner := newFakeRunner(simulatePresent("markdownlint-cli2"))
+
+		err := Run(t.Context(), runner, io.Discard, io.Discard, Config{})
 		if err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
@@ -31,21 +35,21 @@ func TestRun(t *testing.T) {
 		for i, tool := range DefaultTools {
 			want[i] = "go install " + tool.Pkg + "@latest"
 		}
-		assertCommands(t, recorder.commands, want)
+		assertCommands(t, runner.commands, want)
 	})
 
 	t.Run("extras append after defaults in declared order", func(t *testing.T) {
-		recorder, restore := stubExec(t, simulatePresent("markdownlint-cli2"))
-		defer restore()
+		t.Parallel()
+		runner := newFakeRunner(simulatePresent("markdownlint-cli2"))
 
 		cfg := Config{ExtraTools: []ToolSpec{
 			{Pkg: "example.com/tool-a", Version: "latest"},
 			{Pkg: "example.com/tool-b", Version: "v1.2.3"},
 		}}
-		if err := Run(t.Context(), io.Discard, io.Discard, cfg); err != nil {
+		if err := Run(t.Context(), runner, io.Discard, io.Discard, cfg); err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
-		got := recorder.commands
+		got := runner.commands
 		if len(got) != len(DefaultTools)+2 {
 			t.Fatalf("recorded %d commands, want %d", len(got), len(DefaultTools)+2)
 		}
@@ -58,33 +62,33 @@ func TestRun(t *testing.T) {
 	})
 
 	t.Run("empty version on an extra defaults to latest", func(t *testing.T) {
-		recorder, restore := stubExec(t, simulatePresent("markdownlint-cli2"))
-		defer restore()
+		t.Parallel()
+		runner := newFakeRunner(simulatePresent("markdownlint-cli2"))
 
 		cfg := Config{ExtraTools: []ToolSpec{{Pkg: "example.com/tool"}}}
-		if err := Run(t.Context(), io.Discard, io.Discard, cfg); err != nil {
+		if err := Run(t.Context(), runner, io.Discard, io.Discard, cfg); err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
-		last := recorder.commands[len(recorder.commands)-1]
+		last := runner.commands[len(runner.commands)-1]
 		if last != "go install example.com/tool@latest" {
 			t.Fatalf("last cmd = %q, want go install example.com/tool@latest", last)
 		}
 	})
 
 	t.Run("missing markdownlint with npm available triggers npm install", func(t *testing.T) {
-		recorder, restore := stubExec(t, func(name string) error {
+		t.Parallel()
+		runner := newFakeRunner(func(name string) error {
 			if name == "markdownlint-cli2" {
 				return exec.ErrNotFound
 			}
 			return nil // npm available
 		})
-		defer restore()
 
 		var stderr bytes.Buffer
-		if err := Run(t.Context(), io.Discard, &stderr, Config{}); err != nil {
+		if err := Run(t.Context(), runner, io.Discard, &stderr, Config{}); err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
-		last := recorder.commands[len(recorder.commands)-1]
+		last := runner.commands[len(runner.commands)-1]
 		if last != "npm install -g markdownlint-cli2" {
 			t.Fatalf("last cmd = %q, want npm install -g markdownlint-cli2", last)
 		}
@@ -94,15 +98,14 @@ func TestRun(t *testing.T) {
 	})
 
 	t.Run("missing markdownlint and missing npm surfaces a warning", func(t *testing.T) {
-		recorder, restore := stubExec(t, func(_ string) error { return exec.ErrNotFound })
-		defer restore()
+		t.Parallel()
+		runner := newFakeRunner(func(_ string) error { return exec.ErrNotFound })
 
 		var stderr bytes.Buffer
-		if err := Run(t.Context(), io.Discard, &stderr, Config{}); err != nil {
+		if err := Run(t.Context(), runner, io.Discard, &stderr, Config{}); err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
-		// No npm install invocation.
-		for _, c := range recorder.commands {
+		for _, c := range runner.commands {
 			if strings.HasPrefix(c, "npm") {
 				t.Fatalf("unexpected npm invocation: %q", c)
 			}
@@ -113,10 +116,11 @@ func TestRun(t *testing.T) {
 	})
 
 	t.Run("install failure aborts the run", func(t *testing.T) {
-		_, restore := stubExecFail(t, errors.New("network down"))
-		defer restore()
+		t.Parallel()
+		runner := newFakeRunner(simulatePresent("markdownlint-cli2"))
+		runner.runErr = errors.New("network down")
 
-		err := Run(t.Context(), io.Discard, io.Discard, Config{})
+		err := Run(t.Context(), runner, io.Discard, io.Discard, Config{})
 		if err == nil {
 			t.Fatalf("Run returned nil, want error")
 		}
@@ -126,49 +130,29 @@ func TestRun(t *testing.T) {
 	})
 }
 
-// commandRecorder captures the sequence of subprocess invocations
-// the test triggered.
-type commandRecorder struct {
+// fakeRunner satisfies [xexec.Runner] for tests. It records every
+// Run invocation as a `<name> <args>` string and honours a
+// presence policy from LookPath.
+type fakeRunner struct {
 	commands []string
+	runErr   error
+	present  func(name string) error
 }
 
-// stubExec installs a runCmd that records every invocation and a
-// lookPath honouring the presence policy returned by want. The
-// returned restore function must be called via defer to undo the
-// patch.
-func stubExec(t *testing.T, present func(name string) error) (*commandRecorder, func()) {
-	t.Helper()
-	rec := &commandRecorder{}
-	origRun, origLook := runCmd, lookPath
-	runCmd = func(_ context.Context, _, _ io.Writer, name string, args ...string) error {
-		rec.commands = append(rec.commands, strings.Join(append([]string{name}, args...), " "))
-		return nil
-	}
-	lookPath = func(name string) (string, error) {
-		if err := present(name); err != nil {
-			return "", err
-		}
-		return "/usr/local/bin/" + name, nil
-	}
-	return rec, func() {
-		runCmd, lookPath = origRun, origLook
-	}
+func newFakeRunner(present func(string) error) *fakeRunner {
+	return &fakeRunner{present: present}
 }
 
-// stubExecFail installs a runCmd that returns failErr for every
-// invocation. Used by failure-path tests.
-func stubExecFail(t *testing.T, failErr error) (*commandRecorder, func()) {
-	t.Helper()
-	rec := &commandRecorder{}
-	origRun, origLook := runCmd, lookPath
-	runCmd = func(_ context.Context, _, _ io.Writer, name string, args ...string) error {
-		rec.commands = append(rec.commands, strings.Join(append([]string{name}, args...), " "))
-		return failErr
+func (f *fakeRunner) Run(_ context.Context, _ xexec.Options, name string, args ...string) error {
+	f.commands = append(f.commands, strings.Join(append([]string{name}, args...), " "))
+	return f.runErr
+}
+
+func (f *fakeRunner) LookPath(name string) (string, error) {
+	if err := f.present(name); err != nil {
+		return "", err
 	}
-	lookPath = func(name string) (string, error) { return "/usr/local/bin/" + name, nil }
-	return rec, func() {
-		runCmd, lookPath = origRun, origLook
-	}
+	return "/usr/local/bin/" + name, nil
 }
 
 // simulatePresent returns a presence policy that reports the named
@@ -183,8 +167,8 @@ func simulatePresent(name string) func(string) error {
 }
 
 // assertCommands fails the test when the recorder did not capture
-// the expected command sequence (must be a prefix of the recorded
-// sequence so callers can ignore the trailing markdownlint probe).
+// the expected command sequence (the want sequence must be a prefix
+// of the recorded calls so callers can ignore trailing probes).
 func assertCommands(t *testing.T, got, want []string) {
 	t.Helper()
 	if len(got) < len(want) {

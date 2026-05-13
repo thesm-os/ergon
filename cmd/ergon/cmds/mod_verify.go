@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.thesmos.sh/ergon/internal/discover"
+	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/mod"
 )
 
@@ -26,7 +27,7 @@ var modVerifyCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return mod.Verify(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), root, mods)
+		return mod.Verify(cmd.Context(), xexec.Command{}, cmd.OutOrStdout(), cmd.ErrOrStderr(), root, mods)
 	},
 }
 

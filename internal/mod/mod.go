@@ -13,9 +13,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"path/filepath"
 
+	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/modules"
 )
 
@@ -24,30 +24,22 @@ import (
 // dirty module so the caller can fix them in one pass.
 var ErrDirty = errors.New("uncommitted go.mod/go.sum changes after `go mod tidy`")
 
-// runCmd shells out to a binary inside cwd and streams its output
-// to the supplied writers. Package-level so tests can swap in a
-// recorder; production callers always invoke the real subprocess.
-var runCmd = func(ctx context.Context, cwd string, stdout, stderr io.Writer, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = cwd
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	return cmd.Run()
-}
-
 // Install runs `go mod download` followed by `go mod verify` in
 // each module. The pair mirrors what `make install` did in the
 // Makefile templates — download fills the module cache, verify
 // confirms checksums match `go.sum`.
-func Install(ctx context.Context, stdout, stderr io.Writer, root string, mods []modules.Module) error {
+func Install(
+	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
+	root string, mods []modules.Module,
+) error {
 	return modules.Iterate(ctx, mods, func(ctx context.Context, m modules.Module) error {
-		cwd := filepath.Join(root, m.Dir)
+		opts := xexec.Options{Dir: filepath.Join(root, m.Dir), Stdout: stdout, Stderr: stderr}
 		fmt.Fprintf(stdout, "[%s] go mod download\n", m.Dir)
-		if err := runCmd(ctx, cwd, stdout, stderr, "go", "mod", "download"); err != nil {
+		if err := runner.Run(ctx, opts, "go", "mod", "download"); err != nil {
 			return fmt.Errorf("go mod download: %w", err)
 		}
 		fmt.Fprintf(stdout, "[%s] go mod verify\n", m.Dir)
-		if err := runCmd(ctx, cwd, stdout, stderr, "go", "mod", "verify"); err != nil {
+		if err := runner.Run(ctx, opts, "go", "mod", "verify"); err != nil {
 			return fmt.Errorf("go mod verify: %w", err)
 		}
 		return nil
@@ -57,11 +49,14 @@ func Install(ctx context.Context, stdout, stderr io.Writer, root string, mods []
 // Tidy runs `go mod tidy` in each module. Modifies go.mod and
 // go.sum on disk per Go's tidy semantics — the caller is
 // responsible for committing the result.
-func Tidy(ctx context.Context, stdout, stderr io.Writer, root string, mods []modules.Module) error {
+func Tidy(
+	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
+	root string, mods []modules.Module,
+) error {
 	return modules.Iterate(ctx, mods, func(ctx context.Context, m modules.Module) error {
-		cwd := filepath.Join(root, m.Dir)
+		opts := xexec.Options{Dir: filepath.Join(root, m.Dir), Stdout: stdout, Stderr: stderr}
 		fmt.Fprintf(stdout, "[%s] go mod tidy\n", m.Dir)
-		if err := runCmd(ctx, cwd, stdout, stderr, "go", "mod", "tidy"); err != nil {
+		if err := runner.Run(ctx, opts, "go", "mod", "tidy"); err != nil {
 			return fmt.Errorf("go mod tidy: %w", err)
 		}
 		return nil
@@ -76,8 +71,11 @@ func Tidy(ctx context.Context, stdout, stderr io.Writer, root string, mods []mod
 // The intent matches the Makefile's `check-tidy` gate: a clean
 // `go mod tidy` is a precondition for merging, so divergence is a
 // CI-blocking finding rather than a silent drift.
-func Verify(ctx context.Context, stdout, stderr io.Writer, root string, mods []modules.Module) error {
-	if err := Tidy(ctx, stdout, stderr, root, mods); err != nil {
+func Verify(
+	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
+	root string, mods []modules.Module,
+) error {
+	if err := Tidy(ctx, runner, stdout, stderr, root, mods); err != nil {
 		return err
 	}
 
@@ -85,7 +83,10 @@ func Verify(ctx context.Context, stdout, stderr io.Writer, root string, mods []m
 	for _, m := range mods {
 		modGo := filepath.Join(m.Dir, "go.mod")
 		sumGo := filepath.Join(m.Dir, "go.sum")
-		if err := runCmd(ctx, root, io.Discard, io.Discard, "git", "diff", "--quiet", "--", modGo, sumGo); err != nil {
+		err := runner.Run(ctx,
+			xexec.Options{Dir: root, Stdout: io.Discard, Stderr: io.Discard},
+			"git", "diff", "--quiet", "--", modGo, sumGo)
+		if err != nil {
 			dirty = append(dirty, m.Dir)
 			fmt.Fprintf(stderr, "[%s] go.mod or go.sum changed after `go mod tidy`\n", m.Dir)
 		}

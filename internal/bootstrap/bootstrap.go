@@ -8,7 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
+
+	xexec "go.thesmos.sh/ergon/internal/exec"
 )
 
 // VersionLatest is the canonical "track the upstream HEAD" tag
@@ -38,21 +39,6 @@ var DefaultTools = []ToolSpec{
 const markdownlintHint = "markdownlint-cli2 not installed; install with: " +
 	"brew install markdownlint-cli2 (or npm install -g markdownlint-cli2)"
 
-// runCmd shells out to a binary and streams its output to the
-// caller. Package-level so tests can swap in a recorder; production
-// callers always invoke the real subprocess.
-var runCmd = func(ctx context.Context, stdout, stderr io.Writer, name string, args ...string) error {
-	c := exec.CommandContext(ctx, name, args...)
-	c.Stdout = stdout
-	c.Stderr = stderr
-	return c.Run()
-}
-
-// lookPath wraps [exec.LookPath] behind a swappable seam so tests
-// can simulate "tool present" / "tool missing" without touching
-// PATH.
-var lookPath = exec.LookPath
-
 // Run installs every entry in [DefaultTools] followed by the
 // per-repo extras from cfg.ExtraTools, then probes for
 // markdownlint-cli2 and tries to install it via npm when missing.
@@ -69,18 +55,18 @@ var lookPath = exec.LookPath
 // stdout receives progress messages (one line per tool); stderr
 // carries the warning case described above plus any subprocess
 // noise.
-func Run(ctx context.Context, stdout, stderr io.Writer, cfg Config) error {
+func Run(ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer, cfg Config) error {
 	all := make([]ToolSpec, 0, len(DefaultTools)+len(cfg.ExtraTools))
 	all = append(all, DefaultTools...)
 	all = append(all, cfg.ExtraTools...)
 
 	for _, t := range all {
-		if err := installGoTool(ctx, stdout, stderr, t); err != nil {
+		if err := installGoTool(ctx, runner, stdout, stderr, t); err != nil {
 			return fmt.Errorf("install %s: %w", t.Pkg, err)
 		}
 	}
 
-	if err := ensureMarkdownlint(ctx, stdout, stderr); err != nil {
+	if err := ensureMarkdownlint(ctx, runner, stdout, stderr); err != nil {
 		fmt.Fprintln(stderr, "warning:", err)
 	}
 	return nil
@@ -88,13 +74,15 @@ func Run(ctx context.Context, stdout, stderr io.Writer, cfg Config) error {
 
 // installGoTool runs `go install <Pkg>@<Version>` for the given
 // spec. An empty Version is treated as [VersionLatest].
-func installGoTool(ctx context.Context, stdout, stderr io.Writer, t ToolSpec) error {
+func installGoTool(ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer, t ToolSpec) error {
 	version := t.Version
 	if version == "" {
 		version = VersionLatest
 	}
 	fmt.Fprintf(stdout, "  installing %s@%s\n", t.Pkg, version)
-	return runCmd(ctx, stdout, stderr, "go", "install", fmt.Sprintf("%s@%s", t.Pkg, version))
+	return runner.Run(ctx,
+		xexec.Options{Stdout: stdout, Stderr: stderr},
+		"go", "install", fmt.Sprintf("%s@%s", t.Pkg, version))
 }
 
 // ensureMarkdownlint returns nil when markdownlint-cli2 is already
@@ -102,13 +90,15 @@ func installGoTool(ctx context.Context, stdout, stderr io.Writer, t ToolSpec) er
 // markdownlint-cli2 nor npm is available, returns an error
 // carrying [markdownlintHint] for the caller to surface as a
 // warning.
-func ensureMarkdownlint(ctx context.Context, stdout, stderr io.Writer) error {
-	if _, err := lookPath("markdownlint-cli2"); err == nil {
+func ensureMarkdownlint(ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer) error {
+	if _, err := runner.LookPath("markdownlint-cli2"); err == nil {
 		return nil
 	}
-	if _, err := lookPath("npm"); err != nil {
+	if _, err := runner.LookPath("npm"); err != nil {
 		return errors.New(markdownlintHint)
 	}
 	fmt.Fprintln(stdout, "  installing markdownlint-cli2 via npm")
-	return runCmd(ctx, stdout, stderr, "npm", "install", "-g", "markdownlint-cli2")
+	return runner.Run(ctx,
+		xexec.Options{Stdout: stdout, Stderr: stderr},
+		"npm", "install", "-g", "markdownlint-cli2")
 }

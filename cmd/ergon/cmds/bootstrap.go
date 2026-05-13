@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.thesmos.sh/ergon/internal/bootstrap"
+	xexec "go.thesmos.sh/ergon/internal/exec"
 )
 
 // bootstrapCmd is `ergon bootstrap`. The actual install work lives
@@ -22,6 +23,7 @@ var bootstrapCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return bootstrap.Run(
 			cmd.Context(),
+			xexec.Command{},
 			cmd.OutOrStdout(),
 			cmd.ErrOrStderr(),
 			cfg.Bootstrap,

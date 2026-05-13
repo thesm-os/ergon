@@ -10,17 +10,20 @@ import (
 	"strings"
 	"testing"
 
+	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/modules"
 )
 
 // TestInstall pins the per-module `go mod download` followed by
 // `go mod verify` shape `ergon mod install` runs.
 func TestInstall(t *testing.T) {
-	t.Run("runs download and verify per module in order", func(t *testing.T) {
-		rec, restore := stubExec(t, nil)
-		defer restore()
+	t.Parallel()
 
-		err := Install(t.Context(), io.Discard, io.Discard, "/repo", []modules.Module{
+	t.Run("runs download and verify per module in order", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{}
+
+		err := Install(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{
 			{Dir: "."},
 			{Dir: "cli"},
 		})
@@ -33,16 +36,14 @@ func TestInstall(t *testing.T) {
 			"/repo/cli: go mod download",
 			"/repo/cli: go mod verify",
 		}
-		if !equal(rec.calls, want) {
-			t.Fatalf("calls = %+v, want %+v", rec.calls, want)
-		}
+		assertCalls(t, runner.calls, want)
 	})
 
-	t.Run("download failure aborts the run and surfaces the module dir", func(t *testing.T) {
-		_, restore := stubExec(t, errors.New("network down"))
-		defer restore()
+	t.Run("download failure aborts the run and names the module", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{runErr: errors.New("network down")}
 
-		err := Install(t.Context(), io.Discard, io.Discard, "/repo", []modules.Module{{Dir: "cli"}})
+		err := Install(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{{Dir: "cli"}})
 		if err == nil {
 			t.Fatal("Install returned nil, want error")
 		}
@@ -54,11 +55,13 @@ func TestInstall(t *testing.T) {
 
 // TestTidy pins the per-module `go mod tidy` invocation pattern.
 func TestTidy(t *testing.T) {
-	t.Run("runs tidy per module in declared order", func(t *testing.T) {
-		rec, restore := stubExec(t, nil)
-		defer restore()
+	t.Parallel()
 
-		err := Tidy(t.Context(), io.Discard, io.Discard, "/repo", []modules.Module{
+	t.Run("runs tidy per module in declared order", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{}
+
+		err := Tidy(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{
 			{Dir: "."},
 			{Dir: "cli"},
 			{Dir: "frontend/golang"},
@@ -71,9 +74,7 @@ func TestTidy(t *testing.T) {
 			"/repo/cli: go mod tidy",
 			"/repo/frontend/golang: go mod tidy",
 		}
-		if !equal(rec.calls, want) {
-			t.Fatalf("calls = %+v, want %+v", rec.calls, want)
-		}
+		assertCalls(t, runner.calls, want)
 	})
 }
 
@@ -81,11 +82,13 @@ func TestTidy(t *testing.T) {
 // per-module `git diff --quiet`, surfaces dirty modules through
 // [ErrDirty], and reports a clean result when every diff is silent.
 func TestVerify(t *testing.T) {
-	t.Run("clean diffs across every module return nil", func(t *testing.T) {
-		_, restore := stubExec(t, nil)
-		defer restore()
+	t.Parallel()
 
-		err := Verify(t.Context(), io.Discard, io.Discard, "/repo", []modules.Module{
+	t.Run("clean diffs across every module return nil", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{}
+
+		err := Verify(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{
 			{Dir: "."},
 			{Dir: "cli"},
 		})
@@ -94,22 +97,21 @@ func TestVerify(t *testing.T) {
 		}
 	})
 
-	t.Run("dirty diff in one module surfaces ErrDirty with the module dir", func(t *testing.T) {
-		_, restore := stubExecRouted(t, func(name string, args []string) error {
-			if name == "git" && len(args) > 0 && args[0] == "diff" {
-				// First module (.) is clean, "cli" has a dirty go.mod.
-				for _, a := range args {
-					if strings.HasPrefix(a, "cli/") {
-						return errors.New("exit status 1")
-					}
-				}
+	t.Run("dirty diff in one module surfaces ErrDirty naming that module", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{decide: func(name string, args []string) error {
+			if name != "git" || len(args) == 0 || args[0] != "diff" {
 				return nil
 			}
+			for _, a := range args {
+				if strings.HasPrefix(a, "cli/") {
+					return errors.New("exit status 1")
+				}
+			}
 			return nil
-		})
-		defer restore()
+		}}
 
-		err := Verify(t.Context(), io.Discard, io.Discard, "/repo", []modules.Module{
+		err := Verify(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{
 			{Dir: "."},
 			{Dir: "cli"},
 		})
@@ -122,15 +124,15 @@ func TestVerify(t *testing.T) {
 	})
 
 	t.Run("tidy failure short-circuits the verify", func(t *testing.T) {
-		_, restore := stubExecRouted(t, func(name string, args []string) error {
+		t.Parallel()
+		runner := &fakeRunner{decide: func(name string, args []string) error {
 			if name == "go" && len(args) > 0 && args[0] == "mod" {
 				return errors.New("tidy failed")
 			}
 			return nil
-		})
-		defer restore()
+		}}
 
-		err := Verify(t.Context(), io.Discard, io.Discard, "/repo", []modules.Module{{Dir: "."}})
+		err := Verify(t.Context(), runner, io.Discard, io.Discard, "/repo", []modules.Module{{Dir: "."}})
 		if errors.Is(err, ErrDirty) {
 			t.Fatalf("Verify err = %v, want a tidy failure, not ErrDirty", err)
 		}
@@ -140,51 +142,37 @@ func TestVerify(t *testing.T) {
 	})
 }
 
-// recorder captures every subprocess invocation the test triggered.
-// One entry per call, formatted as `<cwd>: <name> <args...>` so
-// tests can assert sequence and working directory in one comparison.
-type recorder struct {
-	calls []string
+// fakeRunner satisfies [xexec.Runner] for tests. Each call is
+// recorded as `<cwd>: <name> <args...>`; optional decide and
+// runErr fields control the simulated return value.
+type fakeRunner struct {
+	calls  []string
+	runErr error
+	decide func(name string, args []string) error
 }
 
-// stubExec installs a runCmd that records every invocation and
-// returns retErr (typically nil). The returned restore function
-// must be called via defer to undo the patch.
-func stubExec(t *testing.T, retErr error) (*recorder, func()) {
+func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
+	f.calls = append(f.calls, opts.Dir+": "+name+" "+strings.Join(args, " "))
+	if f.decide != nil {
+		return f.decide(name, args)
+	}
+	return f.runErr
+}
+
+func (*fakeRunner) LookPath(name string) (string, error) {
+	return "/usr/local/bin/" + name, nil
+}
+
+// assertCalls compares the recorded calls against want. Want must
+// be exactly equal to got.
+func assertCalls(t *testing.T, got, want []string) {
 	t.Helper()
-	rec := &recorder{}
-	orig := runCmd
-	runCmd = func(_ context.Context, cwd string, _, _ io.Writer, name string, args ...string) error {
-		rec.calls = append(rec.calls, cwd+": "+name+" "+strings.Join(args, " "))
-		return retErr
+	if len(got) != len(want) {
+		t.Fatalf("calls = %+v, want %+v", got, want)
 	}
-	return rec, func() { runCmd = orig }
-}
-
-// stubExecRouted is like [stubExec] but routes the return value
-// through a per-call decision function so tests can simulate a
-// subset of subprocesses failing.
-func stubExecRouted(t *testing.T, decide func(name string, args []string) error) (*recorder, func()) {
-	t.Helper()
-	rec := &recorder{}
-	orig := runCmd
-	runCmd = func(_ context.Context, cwd string, _, _ io.Writer, name string, args ...string) error {
-		rec.calls = append(rec.calls, cwd+": "+name+" "+strings.Join(args, " "))
-		return decide(name, args)
-	}
-	return rec, func() { runCmd = orig }
-}
-
-// equal reports whether two string slices are identical. Avoids
-// the slices import for a one-call site.
-func equal(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("calls[%d] = %q, want %q", i, got[i], w)
 		}
 	}
-	return true
 }
