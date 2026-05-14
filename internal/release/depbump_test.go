@@ -326,7 +326,10 @@ func TestBumpedPaths(t *testing.T) {
 			t.Fatalf("seed go.sum: %v", err)
 		}
 		got := bumpedPaths(root, []string{"cli"})
-		want := []string{"cli/go.mod", "cli/go.sum"}
+		// bumpedPaths produces filepath-joined results, so the want
+		// list is built the same way to stay portable across `/`
+		// (Linux/macOS) and `\` (Windows) separators.
+		want := []string{filepath.Join("cli", "go.mod"), filepath.Join("cli", "go.sum")}
 		if !slices.Equal(got, want) {
 			t.Errorf("got = %+v, want %+v", got, want)
 		}
@@ -338,7 +341,7 @@ func TestBumpedPaths(t *testing.T) {
 		writeWorkspaceMod(t, root, "cli", "module example.com/proj/cli\n\ngo 1.26\n")
 		// No go.sum written.
 		got := bumpedPaths(root, []string{"cli"})
-		want := []string{"cli/go.mod"}
+		want := []string{filepath.Join("cli", "go.mod")}
 		if !slices.Equal(got, want) {
 			t.Errorf("got = %+v, want %+v", got, want)
 		}
@@ -351,7 +354,11 @@ func TestBumpedPaths(t *testing.T) {
 			writeWorkspaceMod(t, root, d, "module example.com/proj/"+d+"\n\ngo 1.26\n")
 		}
 		got := bumpedPaths(root, []string{"a", "b", "c"})
-		want := []string{"a/go.mod", "b/go.mod", "c/go.mod"}
+		want := []string{
+			filepath.Join("a", "go.mod"),
+			filepath.Join("b", "go.mod"),
+			filepath.Join("c", "go.mod"),
+		}
 		if !slices.Equal(got, want) {
 			t.Errorf("got = %+v, want %+v", got, want)
 		}
