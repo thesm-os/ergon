@@ -133,11 +133,20 @@ different policy per metric:
 make bootstrap    # install tool dependencies
 make check        # run the umbrella gate
 make test         # go test ./...
+make test-e2e     # run tests behind `//go:build e2e` (real git / network)
 make build        # go build ./cmd/ergon
 ```
 
 The `Makefile` shells out to ergon (`ERGON ?= go run ./cmd/ergon`)
 so the project's own gates run through the binary it ships.
+
+End-to-end tests live behind the `e2e` build tag so they stay
+out of the default `go test ./...` (and `ergon check`) hot path.
+The release pipeline carries one such test that spins up a
+synthetic two-module git repo, runs `ApplyPipeline` against
+real `git`, and asserts the bump-rewrite-commit-tag flow lands
+correctly — the path with the highest silent-corruption risk
+under fakeRunner-only coverage.
 
 ## License
 

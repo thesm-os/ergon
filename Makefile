@@ -1,6 +1,6 @@
 .PHONY: help bootstrap install fmt license generate build clean \
         lint lint-md tidy check-tidy \
-        test test-race test-bench test-fuzz test-coverage \
+        test test-race test-bench test-fuzz test-coverage test-e2e \
         bench-baseline bench-regression bench-profile \
         check check-coverage check-uncovered check-mutation check-branch check-vuln \
         release
@@ -50,6 +50,8 @@ test-fuzz: ## Run every Fuzz target for the configured duration
 	$(ERGON) test fuzz
 test-coverage: ## Render per-module coverage profiles to HTML
 	$(ERGON) test coverage
+test-e2e: ## Run the end-to-end tests that touch real `git` / network (skipped by default)
+	go test -tags=e2e ./...
 
 bench-baseline: ## Pin the current benchmark numbers to bench/baseline.txt
 	$(ERGON) bench baseline
