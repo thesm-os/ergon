@@ -69,13 +69,6 @@ func ApplyPipeline(
 		}
 	}
 
-	// Probe `git tag -a` upfront so a broken signing setup aborts
-	// before any state changes — better to fail fast than to fail
-	// mid-pipeline with half-created tags requiring manual cleanup.
-	if err := PreflightTagSigning(ctx, runner, root); err != nil {
-		return err
-	}
-
 	// Pin every non-skipped entry's new version so later layers
 	// can rewrite their require lines against a stable map.
 	versions := map[string]string{}

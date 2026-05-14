@@ -262,11 +262,6 @@ func ApplyPlan(
 		fmt.Fprintln(w, "(nothing to tag)")
 		return nil
 	}
-	// Probe signing once upfront so a broken setup aborts before
-	// the first tag is created (matches [ApplyPipeline]'s flow).
-	if err := PreflightTagSigning(ctx, runner, root); err != nil {
-		return err
-	}
 	fmt.Fprintln(w, "Tagging...")
 	for _, e := range tags {
 		body := e.Tag + "\n\n" + opts.Message

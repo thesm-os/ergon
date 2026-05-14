@@ -377,10 +377,10 @@ func TestApplyPlan(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ApplyPlan err: %v", err)
 		}
-		// Filter out the preflight probe's tag operations and any
-		// idempotency-check `git tag -l` / `git rev-list` calls;
-		// count only the real annotated-tag creations.
-		if got := countRealTagCreates(runner.calls); got != 2 {
+		// EnsureTag's existence probe runs `git tag -l` before each
+		// real tag creation, so count only the `git tag -a` calls
+		// (the actual annotated-tag creations).
+		if got := countTagCreates(runner.calls); got != 2 {
 			t.Fatalf("real tag creations = %d, want 2", got)
 		}
 	})
@@ -418,11 +418,12 @@ func TestApplyPlan(t *testing.T) {
 
 	t.Run("git failure wraps the failing tag name", func(t *testing.T) {
 		t.Parallel()
-		// Let the preflight probe succeed; fail only on real tag
-		// creations so the error path exercised is the one inside
-		// ApplyPlan's loop (not the upfront preflight).
+		// EnsureTag runs `git tag -l <name>` first to check
+		// existence (returns empty → tag doesn't exist), then
+		// `git tag -a` to create it. Fail only the create so the
+		// error path exercised is the one inside ApplyPlan's loop.
 		runner := &planFakeRunner{decide: func(_ string, args []string) error {
-			if len(args) >= 5 && args[0] == "tag" && args[1] == "-a" && args[4] != signingProbeName {
+			if len(args) >= 2 && args[0] == "tag" && args[1] == "-a" {
 				return errors.New("tag exists")
 			}
 			return nil
@@ -473,25 +474,19 @@ func (f *planFakeRunner) Run(_ context.Context, opts xexec.Options, name string,
 	return f.runErr
 }
 
-// countRealTagCreates counts `git tag -a -m <msg> <name>` calls
-// whose name is not the [PreflightTagSigning] probe sentinel.
-// Used by tests that need to assert on real tag creations
-// without being thrown off by the preflight probe operations.
-const signingProbeName = "__ergon_release_signing_probe__"
-
-func countRealTagCreates(calls []gitCall) int {
+// countTagCreates counts the `git tag -a -m <msg> <name>` calls
+// recorded by [planFakeRunner]. Used by tests that need to
+// assert on actual annotated-tag creations without being thrown
+// off by [EnsureTag]'s existence-probe `git tag -l` calls.
+func countTagCreates(calls []gitCall) int {
 	n := 0
 	for _, c := range calls {
 		if c.name != "git" || len(c.args) < 5 {
 			continue
 		}
-		if c.args[0] != "tag" || c.args[1] != "-a" {
-			continue
+		if c.args[0] == "tag" && c.args[1] == "-a" {
+			n++
 		}
-		if c.args[4] == signingProbeName {
-			continue
-		}
-		n++
 	}
 	return n
 }

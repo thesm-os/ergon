@@ -175,40 +175,6 @@ func EnsureTag(ctx context.Context, runner xexec.Runner, root, name, message str
 	return Tag(ctx, runner, root, name, message)
 }
 
-// PreflightTagSigning probes whether `git tag -a` can complete
-// against the current repository configuration. Called at the
-// start of the release pipeline so a broken signing setup fails
-// fast — much cleaner than aborting mid-release with half-created
-// tags requiring manual cleanup.
-//
-// The probe creates an ephemeral annotated tag named with a
-// reserved sentinel, then deletes it. Both steps must succeed for
-// the preflight to pass; either failure wraps the underlying git
-// error with a hint about the most common cause (GPG agent
-// unavailable, signing key missing).
-//
-// Safe to call repeatedly: a leftover probe tag from a previous
-// aborted preflight is cleaned up before the new probe runs.
-func PreflightTagSigning(ctx context.Context, runner xexec.Runner, root string) error {
-	const probeName = "__ergon_release_signing_probe__"
-
-	// Defensively clean up a leftover probe from a prior aborted
-	// run before creating a fresh one. Ignore errors: the tag
-	// likely doesn't exist (which is the desired starting state).
-	_, _ = runGit(ctx, runner, root, "tag", "-d", probeName)
-
-	if _, err := runGit(ctx, runner, root, "tag", "-a", "-m", "ergon signing preflight", probeName); err != nil {
-		return fmt.Errorf(
-			"release: tag-signing preflight failed (check GPG / signing-key setup): %w",
-			err,
-		)
-	}
-	if _, err := runGit(ctx, runner, root, "tag", "-d", probeName); err != nil {
-		return fmt.Errorf("release: clean up signing probe tag %q: %w", probeName, err)
-	}
-	return nil
-}
-
 // shortSHA truncates a git SHA to the first 12 characters for
 // human-readable error messages. Returns the input unchanged when
 // it is shorter than 12 characters (e.g. a synthetic SHA used in
