@@ -39,6 +39,29 @@ type Options struct {
 	// NoTag prints the plan but skips tag creation. Useful for
 	// inspecting the resolution before tagging.
 	NoTag bool
+
+	// NoBump disables the intra-workspace go.mod dependency bump
+	// entirely. Each layer's tag lands directly at HEAD with no
+	// `chore(release):` commit in front of it. Useful for
+	// single-module repos and for releases handled by a separate
+	// dep-bump tool.
+	NoBump bool
+
+	// NoPush keeps every git operation local. Tags and bump
+	// commits land in the working repo but never reach a remote.
+	// `go mod tidy` is also skipped because it cannot resolve
+	// the freshly-created tags without a remote — so the bump
+	// commits will carry a stale go.sum until a follow-up
+	// `go mod tidy` after the user pushes manually.
+	NoPush bool
+
+	// AllowDirty bypasses the dirty-HEAD safety check. By default
+	// `ergon release` errors when the working tree has uncommitted
+	// changes, because the intra-workspace bump produces its own
+	// commit and conflating it with unrelated edits corrupts the
+	// release history. Pass --allow-dirty when you know what you
+	// are doing.
+	AllowDirty bool
 }
 
 // NewOptions builds an [Options] from the raw cobra flag values.
@@ -47,12 +70,15 @@ type Options struct {
 // required message).
 func NewOptions(
 	message string, forceMajor, forceMinor, forcePatch bool,
-	bumps []string, dryRun, noTag bool,
+	bumps []string, dryRun, noTag, noBump, noPush, allowDirty bool,
 ) (Options, error) {
 	opts := Options{
-		Message: message,
-		DryRun:  dryRun,
-		NoTag:   noTag,
+		Message:    message,
+		DryRun:     dryRun,
+		NoTag:      noTag,
+		NoBump:     noBump,
+		NoPush:     noPush,
+		AllowDirty: allowDirty,
 	}
 
 	level, err := pickForce(forceMajor, forceMinor, forcePatch)

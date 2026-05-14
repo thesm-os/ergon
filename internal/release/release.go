@@ -62,5 +62,5 @@ func Run(
 		fmt.Fprintln(stdout, "\n(dry-run; no files changed, no tags created)")
 		return nil
 	}
-	return ApplyPlan(ctx, runner, root, stdout, plan, opts)
+	return ApplyPipeline(ctx, runner, root, stdout, mods, plan, opts)
 }

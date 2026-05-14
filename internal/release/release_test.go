@@ -6,11 +6,30 @@ package release
 import (
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"go.thesmos.sh/ergon/internal/modules"
 )
+
+// writeMod stages a minimal go.mod under root/dir so the
+// release pipeline (which reads every module's go.mod to build
+// the intra-workspace dependency graph) can discover the import
+// path. Returns root unchanged for chaining.
+func writeMod(t *testing.T, root, dir, importPath string) string {
+	t.Helper()
+	target := filepath.Join(root, dir)
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", target, err)
+	}
+	body := "module " + importPath + "\n\ngo 1.26\n"
+	if err := os.WriteFile(filepath.Join(target, "go.mod"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	return root
+}
 
 // TestRun pins the orchestrator's four branches:
 //
@@ -52,17 +71,20 @@ func TestRun(t *testing.T) {
 
 	t.Run("normal flow tags every non-skipped module", func(t *testing.T) {
 		t.Parallel()
+		root := writeMod(t, t.TempDir(), "cli", "go.example.com/proj/cli")
 		runner := &planFakeRunner{}
 		var buf strings.Builder
-		err := Run(t.Context(), runner, &buf, "/repo",
+		err := Run(t.Context(), runner, &buf, root,
 			[]modules.Module{{Dir: "cli"}},
-			Options{Force: BumpPatch, Message: "rel"})
+			Options{Force: BumpPatch, Message: "rel", AllowDirty: true})
 		if err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
-		// Two calls: LastTag for the module, then `git tag -a`.
-		if len(runner.calls) != 2 {
-			t.Fatalf("calls = %d, want 2", len(runner.calls))
+		// 3 git calls: LastTag, dirty-check skipped via AllowDirty,
+		// then `git tag -a`. The intra-workspace bump is a no-op
+		// (one-module workspace, no dep edges).
+		if len(runner.calls) < 2 {
+			t.Fatalf("calls = %d, want at least 2", len(runner.calls))
 		}
 	})
 

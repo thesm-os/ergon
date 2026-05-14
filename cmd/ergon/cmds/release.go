@@ -22,6 +22,9 @@ var releaseFlags struct {
 	bumps      []string
 	dryRun     bool
 	noTag      bool
+	noBump     bool
+	noPush     bool
+	allowDirty bool
 }
 
 // releaseCmd is `ergon release`. Bumps module versions across the
@@ -46,6 +49,9 @@ var releaseCmd = &cobra.Command{
 			releaseFlags.bumps,
 			releaseFlags.dryRun,
 			releaseFlags.noTag,
+			releaseFlags.noBump,
+			releaseFlags.noPush,
+			releaseFlags.allowDirty,
 		)
 		if err != nil {
 			return err
@@ -83,5 +89,11 @@ func init() {
 		"Print the plan; change nothing")
 	releaseCmd.Flags().BoolVar(&releaseFlags.noTag, "no-tag", false,
 		"Print the plan but do not create tags")
+	releaseCmd.Flags().BoolVar(&releaseFlags.noBump, "no-bump", false,
+		"Skip the intra-workspace go.mod dependency bump (no `chore(release):` commit produced)")
+	releaseCmd.Flags().BoolVar(&releaseFlags.noPush, "no-push", false,
+		"Keep tags and commits local; implies --no-bump (tidy needs published tags to resolve)")
+	releaseCmd.Flags().BoolVar(&releaseFlags.allowDirty, "allow-dirty", false,
+		"Permit uncommitted changes in the working tree (default: error out so the release commit stays clean)")
 	rootCmd.AddCommand(releaseCmd)
 }
