@@ -25,10 +25,8 @@ func TestScaffold(t *testing.T) {
 		t.Parallel()
 		dest := t.TempDir()
 		vars := ScaffoldVars{
-			Name: "proj",
-			Builds: []BuildSpec{
-				{ID: "proj", BinaryName: "proj", Dir: ".", MainPath: "./cmd/proj", ModulePath: "example.com/proj"},
-			},
+			Name:   "proj",
+			Builds: []BuildSpec{cmdBuild("proj", "example.com/proj")},
 		}
 		if err := Scaffold(io.Discard, dest, vars, false); err != nil {
 			t.Fatalf("Scaffold err: %v", err)
@@ -58,7 +56,7 @@ func TestScaffold(t *testing.T) {
 		vars := ScaffoldVars{
 			Name:   "proj",
 			UPX:    true,
-			Builds: []BuildSpec{{ID: "proj", BinaryName: "proj", Dir: ".", MainPath: "./cmd/proj", ModulePath: "example.com/proj"}},
+			Builds: []BuildSpec{cmdBuild("proj", "example.com/proj")},
 		}
 		if err := Scaffold(io.Discard, dest, vars, false); err != nil {
 			t.Fatalf("Scaffold err: %v", err)
@@ -81,7 +79,7 @@ func TestScaffold(t *testing.T) {
 			Homebrew:         true,
 			HomebrewTapOwner: "myorg",
 			HomebrewTapName:  "homebrew-tap",
-			Builds:           []BuildSpec{{ID: "proj", BinaryName: "proj", Dir: ".", MainPath: "./cmd/proj", ModulePath: "example.com/proj"}},
+			Builds:           []BuildSpec{cmdBuild("proj", "example.com/proj")},
 		}
 		if err := Scaffold(io.Discard, dest, vars, false); err != nil {
 			t.Fatalf("Scaffold err: %v", err)
@@ -107,7 +105,7 @@ func TestScaffold(t *testing.T) {
 			Docker:         true,
 			DockerPrefix:   "ghcr.io/myorg",
 			DockerRegistry: "ghcr.io",
-			Builds:         []BuildSpec{{ID: "proj", BinaryName: "proj", Dir: ".", MainPath: "./cmd/proj", ModulePath: "example.com/proj"}},
+			Builds:         []BuildSpec{cmdBuild("proj", "example.com/proj")},
 		}
 		if err := Scaffold(io.Discard, dest, vars, false); err != nil {
 			t.Fatalf("Scaffold err: %v", err)
@@ -146,8 +144,8 @@ func TestScaffold(t *testing.T) {
 			DockerPrefix:   "ghcr.io/myorg",
 			DockerRegistry: "ghcr.io",
 			Builds: []BuildSpec{
-				{ID: "foo", BinaryName: "foo", Dir: ".", MainPath: "./cmd/foo", ModulePath: "example.com/proj"},
-				{ID: "bar", BinaryName: "bar", Dir: ".", MainPath: "./cmd/bar", ModulePath: "example.com/proj"},
+				cmdBuild("foo", "example.com/proj"),
+				cmdBuild("bar", "example.com/proj"),
 			},
 		}
 		if err := Scaffold(io.Discard, dest, vars, false); err != nil {
@@ -172,9 +170,9 @@ func TestScaffold(t *testing.T) {
 		vars := ScaffoldVars{
 			Name:           "proj",
 			Docker:         true,
-			DockerPrefix:   "docker.io/myorg",
-			DockerRegistry: "docker.io",
-			Builds:         []BuildSpec{{ID: "proj", BinaryName: "proj", Dir: ".", MainPath: "./cmd/proj", ModulePath: "example.com/proj"}},
+			DockerPrefix:   dockerHubRegistry + "/myorg",
+			DockerRegistry: dockerHubRegistry,
+			Builds:         []BuildSpec{cmdBuild("proj", "example.com/proj")},
 		}
 		if err := Scaffold(io.Discard, dest, vars, false); err != nil {
 			t.Fatalf("Scaffold err: %v", err)
@@ -193,8 +191,8 @@ func TestScaffold(t *testing.T) {
 			// Two builds, same module path -> one version package
 			// at <root>/internal/version/.
 			Builds: []BuildSpec{
-				{ID: "foo", BinaryName: "foo", Dir: ".", MainPath: "./cmd/foo", ModulePath: "example.com/proj"},
-				{ID: "bar", BinaryName: "bar", Dir: ".", MainPath: "./cmd/bar", ModulePath: "example.com/proj"},
+				cmdBuild("foo", "example.com/proj"),
+				cmdBuild("bar", "example.com/proj"),
 			},
 		}
 		if err := Scaffold(io.Discard, dest, vars, false); err != nil {
@@ -243,7 +241,7 @@ func TestScaffold(t *testing.T) {
 		var stdout strings.Builder
 		vars := ScaffoldVars{
 			Name:   "proj",
-			Builds: []BuildSpec{{ID: "proj", BinaryName: "proj", Dir: ".", MainPath: "./cmd/proj", ModulePath: "example.com/proj"}},
+			Builds: []BuildSpec{cmdBuild("proj", "example.com/proj")},
 		}
 		if err := Scaffold(&stdout, dest, vars, false); err != nil {
 			t.Fatalf("Scaffold err: %v", err)
@@ -263,7 +261,7 @@ func TestScaffold(t *testing.T) {
 		seedFile(t, dest, ".goreleaser.yml", "custom\n")
 		vars := ScaffoldVars{
 			Name:   "proj",
-			Builds: []BuildSpec{{ID: "proj", BinaryName: "proj", Dir: ".", MainPath: "./cmd/proj", ModulePath: "example.com/proj"}},
+			Builds: []BuildSpec{cmdBuild("proj", "example.com/proj")},
 		}
 		if err := Scaffold(io.Discard, dest, vars, true); err != nil {
 			t.Fatalf("Scaffold force err: %v", err)
@@ -282,7 +280,7 @@ func TestScaffold(t *testing.T) {
 		dest := t.TempDir()
 		vars := ScaffoldVars{
 			Name:   "mycli",
-			Builds: []BuildSpec{{ID: "mycli", BinaryName: "mycli", Dir: ".", MainPath: "./cmd/mycli", ModulePath: "example.com/proj"}},
+			Builds: []BuildSpec{cmdBuild("mycli", "example.com/proj")},
 		}
 		if err := Scaffold(io.Discard, dest, vars, false); err != nil {
 			t.Fatalf("Scaffold err: %v", err)
@@ -314,12 +312,15 @@ func TestParseDockerRegistry(t *testing.T) {
 		want  string
 	}{
 		{name: "ghcr.io is recognised as a registry", image: "ghcr.io/owner/foo", want: "ghcr.io"},
-		{name: "dotted hostname is recognised as a registry", image: "registry.example.com/foo", want: "registry.example.com"},
+		{
+			name:  "dotted hostname is recognised as a registry",
+			image: "registry.example.com/foo", want: "registry.example.com",
+		},
 		{name: "localhost with port is recognised", image: "localhost:5000/foo", want: "localhost:5000"},
 		{name: "bare localhost is recognised", image: "localhost/foo", want: "localhost"},
-		{name: "docker.io as explicit prefix is recognised", image: "docker.io/owner/foo", want: "docker.io"},
-		{name: "no slash defaults to docker.io", image: "myimage", want: "docker.io"},
-		{name: "owner/repo without dotted prefix defaults to docker.io", image: "owner/foo", want: "docker.io"},
+		{name: "docker.io as explicit prefix is recognised", image: "docker.io/owner/foo", want: dockerHubRegistry},
+		{name: "no slash defaults to docker.io", image: "myimage", want: dockerHubRegistry},
+		{name: "owner/repo without dotted prefix defaults to docker.io", image: "owner/foo", want: dockerHubRegistry},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -419,6 +420,22 @@ func TestResolveBuildSpec(t *testing.T) {
 			t.Fatalf("err = %v, want wrapped ErrNoEnclosingModule", err)
 		}
 	})
+}
+
+// cmdBuild returns a [BuildSpec] for a build at ./cmd/<name>
+// under the given module. Reduces inline noise in table-driven
+// tests that need a build but do not care about its exact
+// shape; callers needing a non-conventional layout (e.g. a
+// submodule build with Dir=./cli) construct the [BuildSpec]
+// inline.
+func cmdBuild(name, modulePath string) BuildSpec {
+	return BuildSpec{
+		ID:         name,
+		BinaryName: name,
+		Dir:        ".",
+		MainPath:   "./cmd/" + name,
+		ModulePath: modulePath,
+	}
 }
 
 // assertFileExists fails the test when <dest>/<rel> is not a

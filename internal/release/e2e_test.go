@@ -283,4 +283,3 @@ func assertTagExists(t *testing.T, dir, name string) {
 			name, strings.TrimSpace(gitOut(t, dir, "tag", "--list")))
 	}
 }
-

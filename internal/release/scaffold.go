@@ -285,6 +285,12 @@ func renderScaffold(body string, ctx any) (string, error) {
 	return buf.String(), nil
 }
 
+// dockerHubRegistry is the fallback Docker Hub registry
+// hostname. Extracted as a const because the value appears
+// across both [ParseDockerRegistry]'s fallback and several
+// test cases; goconst flags repeated literals here.
+const dockerHubRegistry = "docker.io"
+
 // ParseDockerRegistry extracts the registry portion of a
 // Docker image reference. The first path segment is treated as
 // a registry when it contains a `.` or `:` (so `ghcr.io`,
@@ -303,7 +309,7 @@ func ParseDockerRegistry(image string) string {
 			return first
 		}
 	}
-	return "docker.io"
+	return dockerHubRegistry
 }
 
 // ErrNoEnclosingModule is returned by [ResolveBuildSpec] when no

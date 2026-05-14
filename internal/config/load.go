@@ -62,7 +62,8 @@ func Load(path string) (Config, error) {
 	// case without modifying cfg, which is exactly the behaviour we
 	// want. Distinguishing it from a parse error matters only for
 	// the error path below.
-	if err := yaml.UnmarshalWithOptions(data, &cfg,
+	if err := yaml.UnmarshalWithOptions(
+		data, &cfg,
 		yaml.Strict(),
 		yaml.CustomUnmarshaler[time.Duration](unmarshalDuration),
 	); err != nil {

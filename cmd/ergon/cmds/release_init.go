@@ -116,7 +116,8 @@ func resolveReleaseInitVars(
 		owner, repo, ok := splitOwnerRepo(homebrew)
 		if !ok {
 			return release.ScaffoldVars{}, fmt.Errorf(
-				"--homebrew expects owner/repo, got %q", homebrew)
+				"--homebrew expects owner/repo, got %q", homebrew,
+			)
 		}
 		vars.Homebrew = true
 		vars.HomebrewTapOwner = owner
