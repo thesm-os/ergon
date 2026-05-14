@@ -11,9 +11,12 @@ import (
 	xexec "go.thesmos.sh/ergon/internal/exec"
 )
 
-// checkVulnCmd is `ergon check vuln`. Runs `govulncheck ./...`
-// per discovered module.
-var checkVulnCmd = &cobra.Command{
+// lintVulnCmd is `ergon lint vuln`. Runs `govulncheck ./...` per
+// discovered module. The command lives under `lint` because
+// govulncheck is a static analyser (it traces import graphs and
+// reachable symbols, not runtime behaviour), grouping it with vet
+// and golangci-lint.
+var lintVulnCmd = &cobra.Command{
 	Use:   "vuln",
 	Short: "Run govulncheck per module",
 	Args:  cobra.NoArgs,
@@ -28,5 +31,5 @@ var checkVulnCmd = &cobra.Command{
 }
 
 func init() {
-	checkCmd.AddCommand(checkVulnCmd)
+	lintCmd.AddCommand(lintVulnCmd)
 }

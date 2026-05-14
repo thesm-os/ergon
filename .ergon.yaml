@@ -51,16 +51,25 @@ license:
 
 # lint — `ergon lint` umbrella
 #
-# The umbrella runs four stages by default: `vet`, `go`, `md`,
-# `license`. Use `enabled` to restrict the set (allowlist) or
-# `disabled` to subtract from it (denylist); the CLI flags
-# `--only` / `--skip` layer on top per-invocation.
+# The umbrella runs the full static-analysis suite by default:
+# `vet`, `go`, `md`, `license`, `skip-expiry`, `error-prefix`,
+# `vuln`. Anything that examines source without running tests
+# belongs here; test-derived gates (coverage, mutation, branch)
+# live under `checks` and run from `ergon check`.
 #
-# An unknown stage name in either field surfaces as a usage error
-# so typos are caught at start time.
+# Use `enabled` to restrict the set (allowlist) or `disabled` to
+# subtract from it (denylist); the CLI flags `--only` / `--skip`
+# layer on top per-invocation. An unknown stage name in either
+# field surfaces as a usage error so typos are caught at start
+# time.
 lint:
   enabled: []   # empty = every stage in scope (the default)
   disabled: []  # remove individual stages without forking the binary
+  # error-prefix — `ergon lint error-prefix`
+  error_prefix:
+    # Directories (repository-relative) the walker recurses into.
+    # `[.]` covers the entire tree.
+    target_dirs: ["."]
 
 # markdown — markdownlint-cli2 invocation shared by `ergon fmt`
 # (auto-fix mode) and `ergon lint md` (reporting only)
@@ -135,12 +144,13 @@ release:
 #   exclusion knob).
 checks:
   # Stage allow/denylist for the `ergon check` umbrella. Stage
-  # names are `mod`, `lint`, `test`, `coverage`, `skip-expiry`,
-  # `error-prefix`, `vuln`, plus the opt-in `mutation` and
-  # `branch` (auto-appended when their thresholds are declared
-  # below). The CLI flags `--only` / `--skip` layer on top
-  # per-invocation; an unknown stage name surfaces as a usage
-  # error.
+  # names are `mod`, `lint`, `test`, `coverage`, plus the opt-in
+  # `mutation` and `branch` (auto-appended when their thresholds
+  # are declared below). Static-analysis stages (skip-expiry,
+  # error-prefix, vuln) live under `lint` and run via the nested
+  # `lint` stage above. The CLI flags `--only` / `--skip` layer
+  # on top per-invocation; an unknown stage name surfaces as a
+  # usage error.
   enabled: []   # empty = every stage in scope (the default)
   disabled: []  # remove individual stages without forking the binary
 
@@ -211,12 +221,6 @@ checks:
       workers: 2
       test_cpu: 2
       timeout_coefficient: 30
-
-  # error-prefix — `ergon check error-prefix`
-  error_prefix:
-    # Directories (repository-relative) the walker recurses into.
-    # `[.]` covers the entire tree.
-    target_dirs: ["."]
 
   # commit-msg — `ergon check commit-msg <file>`
   commit_msg:

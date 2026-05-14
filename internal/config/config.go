@@ -18,7 +18,6 @@ import (
 	"go.thesmos.sh/ergon/internal/bootstrap"
 	"go.thesmos.sh/ergon/internal/checks/commitmsg"
 	"go.thesmos.sh/ergon/internal/checks/coverage"
-	"go.thesmos.sh/ergon/internal/checks/errorprefix"
 	"go.thesmos.sh/ergon/internal/checks/mutation"
 	"go.thesmos.sh/ergon/internal/checks/policy"
 	"go.thesmos.sh/ergon/internal/license"
@@ -135,12 +134,11 @@ type ChecksConfig struct {
 	// [mutation.Config].
 	Mutation mutation.Config `yaml:"mutation"`
 
-	// ErrorPrefix configures `ergon check error-prefix`. See
-	// [errorprefix.Config].
-	ErrorPrefix errorprefix.Config `yaml:"error_prefix"`
-
 	// CommitMsg configures `ergon check commit-msg`. See
-	// [commitmsg.Config].
+	// [commitmsg.Config]. CommitMsg lives under checks rather
+	// than under lint because the validator is wired into the
+	// pre-commit `commit-msg` hook surface, not into the
+	// `ergon lint` umbrella.
 	CommitMsg commitmsg.Config `yaml:"commit_msg"`
 }
 
@@ -158,10 +156,9 @@ func Defaults() Config {
 		Bench:     bench.Defaults(),
 		Release:   release.Defaults(),
 		Checks: ChecksConfig{
-			Coverage:    coverage.Defaults(),
-			Mutation:    mutation.Defaults(),
-			ErrorPrefix: errorprefix.Defaults(),
-			CommitMsg:   commitmsg.Defaults(),
+			Coverage:  coverage.Defaults(),
+			Mutation:  mutation.Defaults(),
+			CommitMsg: commitmsg.Defaults(),
 		},
 	}
 }

@@ -11,10 +11,13 @@ import (
 	xexec "go.thesmos.sh/ergon/internal/exec"
 )
 
-// checkSkipExpiryCmd is `ergon check skip-expiry`. Scans every
+// lintSkipExpiryCmd is `ergon lint skip-expiry`. Scans every
 // git-visible `_test.go` file for `t.Skip("...expires YYYY-MM-DD")`
-// declarations and fails when any date is on or before today.
-var checkSkipExpiryCmd = &cobra.Command{
+// declarations and fails when any date is on or before today. The
+// command lives under `lint` because the scan is pure static
+// analysis — no test execution is required — so it belongs in the
+// same umbrella as vet and golangci-lint.
+var lintSkipExpiryCmd = &cobra.Command{
 	Use:   "skip-expiry",
 	Short: "Enforce the t.Skip expiry-date policy",
 	Args:  cobra.NoArgs,
@@ -33,5 +36,5 @@ var checkSkipExpiryCmd = &cobra.Command{
 }
 
 func init() {
-	checkCmd.AddCommand(checkSkipExpiryCmd)
+	lintCmd.AddCommand(lintSkipExpiryCmd)
 }

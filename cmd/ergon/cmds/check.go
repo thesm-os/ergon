@@ -4,20 +4,15 @@
 package cmds
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"io"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
 
 	"go.thesmos.sh/ergon/internal/checks/branch"
 	"go.thesmos.sh/ergon/internal/checks/coverage"
-	"go.thesmos.sh/ergon/internal/checks/errorprefix"
 	"go.thesmos.sh/ergon/internal/checks/mutation"
-	"go.thesmos.sh/ergon/internal/checks/skipexpiry"
-	"go.thesmos.sh/ergon/internal/checks/vuln"
 	"go.thesmos.sh/ergon/internal/discover"
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/lint"
@@ -42,27 +37,36 @@ var (
 	checkSkip []string
 )
 
-// checkCmd is `ergon check`. Bare invocation runs the umbrella
-// pre-merge gate: mod verify → lint → test (which produces the
-// coverage profiles) → coverage thresholds → skip-expiry →
-// error-prefix → vuln, plus the two slow gates when the user has
-// opted in via `.ergon.yaml`:
+// checkCmd is `ergon check`. The umbrella runs the pre-merge gate
+// composed entirely of test-derived stages and the orchestrators
+// that feed them:
 //
-//   - mutation: runs when `checks.mutation.packages` is non-empty
-//     (declaring per-layer score / coverage thresholds).
-//   - branch:   runs when any layer under `checks.coverage.packages`
+//   - mod      `go mod verify` (clean tidy precondition)
+//   - lint     the full static-analysis suite (see `ergon lint`)
+//   - test     `go test` per module + coverage profile collection
+//   - coverage per-layer line-coverage thresholds
+//   - mutation per-layer gremlins thresholds (opt-in)
+//   - branch   per-layer gobco thresholds (opt-in)
+//
+// The static-analysis gates that used to live here
+// (`skip-expiry`, `error-prefix`, `vuln`) moved into `ergon lint`
+// where they belong by nature — none of them needs test artefacts
+// — and the umbrella picks them up implicitly via its `lint`
+// stage. The split lets `ergon lint` run as a fast pre-PR gate
+// without paying the test-execution cost.
+//
+// Both mutation and branch are minutes-slow per layer; the
+// umbrella appends them only when their respective `.ergon.yaml`
+// thresholds are declared:
+//
+//   - mutation: runs when `checks.mutation.packages` is non-empty.
+//   - branch:   runs when any `checks.coverage.packages` layer
 //     sets `require_branch: true`.
 //
-// Both gates are minutes-slow per layer (gremlins re-runs the
-// test suite against mutated source; gobco rebuilds each package
-// under test), so the umbrella stays fast when neither is
-// declared. Subcommands (`ergon check mutation`, `ergon check
-// branch`) are always available regardless of configuration.
-//
-// The stage list can be narrowed further via `.ergon.yaml`'s
+// The stage list can be narrowed via `.ergon.yaml`'s
 // `checks.enabled` / `checks.disabled` or per-invocation via
-// `--only` / `--skip`. An unknown stage name in either surface
-// surfaces as a usage error so typos are caught at start time.
+// `--only` / `--skip`. An unknown stage name surfaces as a usage
+// error so typos are caught at start time.
 //
 // Aggregation: by default every (filtered-in) stage runs even if
 // an earlier one failed, and a closing summary block lists each
@@ -72,20 +76,19 @@ var (
 var checkCmd = &cobra.Command{
 	Use:   "check",
 	Short: "Run the full pre-merge gate",
-	Long: "Runs the umbrella check sequence: mod verify, lint, test, " +
-		"coverage, skip-expiry, error-prefix, and vuln. The mutation " +
-		"and branch gates are appended automatically when their " +
-		"respective `.ergon.yaml` thresholds are declared (mutation: " +
-		"`checks.mutation.packages` non-empty; branch: any coverage " +
-		"layer with `require_branch: true`).\n\nThe stage list can " +
-		"be narrowed via `.ergon.yaml`'s `checks.enabled` / " +
-		"`checks.disabled` or per-invocation via `--only` / `--skip`. " +
-		"Stage names are `mod`, `lint`, `test`, `coverage`, " +
-		"`skip-expiry`, `error-prefix`, `vuln`, plus the opt-in " +
-		"`mutation` and `branch`.\n\nBy default every stage runs " +
-		"and the closing summary lists each stage's verdict; pass " +
-		"--fast (-f) to abort at the first failure. Subcommands run " +
-		"individual stages.",
+	Long: "Runs the umbrella pre-merge gate: mod verify, lint (the " +
+		"full static-analysis suite — see `ergon lint`), test, and " +
+		"coverage. The mutation and branch gates are appended " +
+		"automatically when their `.ergon.yaml` thresholds are " +
+		"declared (mutation: `checks.mutation.packages` non-empty; " +
+		"branch: any coverage layer with `require_branch: true`).\n\n" +
+		"The stage list can be narrowed via `.ergon.yaml`'s " +
+		"`checks.enabled` / `checks.disabled` or per-invocation via " +
+		"`--only` / `--skip`. Stage names are `mod`, `lint`, `test`, " +
+		"`coverage`, plus the opt-in `mutation` and `branch`.\n\n" +
+		"By default every stage runs and the closing summary lists " +
+		"each stage's verdict; pass --fast (-f) to abort at the first " +
+		"failure.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		ctx := cmd.Context()
@@ -106,22 +109,6 @@ var checkCmd = &cobra.Command{
 		}
 		coverageDir := filepath.Join(root, "."+name, "coverage")
 
-		// goFiles is needed by skip-expiry and error-prefix. It is
-		// resolved lazily so a failure here is itself recorded as
-		// a stage outcome rather than a hard abort.
-		var goFiles []string
-		gitFiles := func() error {
-			if goFiles != nil {
-				return nil
-			}
-			files, gerr := discover.GitFiles(ctx, runner, root, ".go")
-			if gerr != nil {
-				return gerr
-			}
-			goFiles = files
-			return nil
-		}
-
 		in, err := testInputs(ctx)
 		if err != nil {
 			return err
@@ -141,7 +128,8 @@ var checkCmd = &cobra.Command{
 			{Name: "mod", Run: func() error { return mod.Verify(ctx, runner, stdout, stderr, root, mods, opts) }},
 			{Name: "lint", Run: func() error {
 				return lint.All(ctx, runner, stdout, stderr,
-					lint.Inputs{Root: root, Modules: mods}, cfg.Markdown, cfg.License,
+					lint.Inputs{Root: root, Modules: mods, GitFiles: gitFilesFor(ctx, runner, root)},
+					cfg.Markdown, cfg.License, cfg.Lint.ErrorPrefix,
 					lintFilter, opts)
 			}},
 			{Name: "test", Run: func() error {
@@ -152,29 +140,6 @@ var checkCmd = &cobra.Command{
 					root, coverageDir, imports, cfg.Checks.Coverage,
 					cfg.Checks.Excludes, cfg.Checks.Skips, coverage.RunOptions{})
 			}},
-			{Name: "skip-expiry", Run: func() error {
-				if err := gitFiles(); err != nil {
-					return err
-				}
-				return stage.Single(ctx, stdout, opts,
-					"skip-expiry", "scan t.Skip() for an expiry date",
-					"every t.Skip carries a parseable expiry date", "",
-					func(_ context.Context, sOut, sErr io.Writer) error {
-						return skipexpiry.Run(sOut, sErr, root, goFiles)
-					})
-			}},
-			{Name: "error-prefix", Run: func() error {
-				if err := gitFiles(); err != nil {
-					return err
-				}
-				return stage.Single(ctx, stdout, opts,
-					"error-prefix", "errors.New text starts with the package name",
-					"every errors.New carries the expected package prefix", "",
-					func(_ context.Context, sOut, sErr io.Writer) error {
-						return errorprefix.Run(sOut, sErr, root, goFiles, cfg.Checks.ErrorPrefix)
-					})
-			}},
-			{Name: "vuln", Run: func() error { return vuln.Run(ctx, runner, stdout, stderr, root, mods, opts) }},
 		}
 
 		// The mutation and branch gates are opt-in per configuration:

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	"go.thesmos.sh/ergon/internal/checks/errorprefix"
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/license"
 	"go.thesmos.sh/ergon/internal/markdown"
@@ -106,18 +107,33 @@ func TestGo(t *testing.T) {
 	})
 }
 
-// TestAll pins the orchestration order. The contract: vet -> go ->
-// markdown -> license; any failure short-circuits the remaining
-// stages. Inputs need a real filesystem for license to walk.
+// TestAll pins the umbrella's contract:
+//
+//   - Default mode runs the full stage list (vet, go, md, license,
+//     skip-expiry, error-prefix, vuln) in declared order; each
+//     subprocess-backed stage records its canonical invocation.
+//   - Fast mode aborts at the first failing stage.
+//   - The Filter (config + CLI overrides) narrows the live stage
+//     set and Unknown stage names surface [stage.ErrUnknownStage].
+//
+// skip-expiry and error-prefix do not record subprocess calls
+// (pure AST scans), so they verify implicitly via the absence of
+// orchestrator failures. The stages' internal contracts have
+// their own coverage in `internal/checks/skipexpiry` and
+// `internal/checks/errorprefix`.
 func TestAll(t *testing.T) {
 	t.Parallel()
 
-	t.Run("orchestrates vet, golangci-lint, markdown, license in order", func(t *testing.T) {
+	t.Run("orchestrates every static-analysis stage in declared order", func(t *testing.T) {
 		t.Parallel()
 		root := buildTree(t, "main.go")
 		runner := &fakeRunner{}
 
-		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
+		in := Inputs{
+			Root:     root,
+			Modules:  []modules.Module{{Dir: "."}},
+			GitFiles: stubGitFiles(),
+		}
 		err := All(
 			t.Context(),
 			runner,
@@ -126,13 +142,17 @@ func TestAll(t *testing.T) {
 			in,
 			markdown.Defaults(),
 			license.Defaults(),
+			errorprefix.Defaults(),
 			stage.Filter{},
 			stage.Options{},
 		)
 		if err != nil {
 			t.Fatalf("All err: %v", err)
 		}
-		want := []string{"go", "golangci-lint", "markdownlint-cli2", "go-license"}
+		// Subprocess-backed stages, in declared order. skip-expiry
+		// and error-prefix are AST scans — they don't shell out
+		// and therefore don't appear here.
+		want := []string{"go", "golangci-lint", "markdownlint-cli2", "go-license", "govulncheck"}
 		got := commandNames(runner.calls)
 		if !slices.Equal(got, want) {
 			t.Fatalf("call sequence = %+v, want %+v", got, want)
@@ -149,7 +169,11 @@ func TestAll(t *testing.T) {
 			return nil
 		}}
 
-		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
+		in := Inputs{
+			Root:     root,
+			Modules:  []modules.Module{{Dir: "."}},
+			GitFiles: stubGitFiles(),
+		}
 		err := All(
 			t.Context(),
 			runner,
@@ -158,14 +182,17 @@ func TestAll(t *testing.T) {
 			in,
 			markdown.Defaults(),
 			license.Defaults(),
+			errorprefix.Defaults(),
 			stage.Filter{},
 			stage.Options{},
 		)
 		if err == nil {
 			t.Fatal("All returned nil, want aggregated vet error")
 		}
-		// Every stage must have run.
-		want := []string{"go", "golangci-lint", "markdownlint-cli2", "go-license"}
+		// Every subprocess-backed stage still records its call even
+		// though vet failed — default (non-fast) mode runs all of
+		// them and aggregates the failures.
+		want := []string{"go", "golangci-lint", "markdownlint-cli2", "go-license", "govulncheck"}
 		got := commandNames(runner.calls)
 		if !slices.Equal(got, want) {
 			t.Fatalf("call sequence = %+v, want %+v (default mode runs every stage)", got, want)
@@ -182,7 +209,11 @@ func TestAll(t *testing.T) {
 			return nil
 		}}
 
-		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
+		in := Inputs{
+			Root:     root,
+			Modules:  []modules.Module{{Dir: "."}},
+			GitFiles: stubGitFiles(),
+		}
 		err := All(
 			t.Context(),
 			runner,
@@ -191,6 +222,7 @@ func TestAll(t *testing.T) {
 			in,
 			markdown.Defaults(),
 			license.Defaults(),
+			errorprefix.Defaults(),
 			stage.Filter{},
 			stage.Options{Fast: true},
 		)
@@ -198,7 +230,7 @@ func TestAll(t *testing.T) {
 			t.Fatal("All returned nil, want vet error")
 		}
 		postVet := map[string]bool{
-			"golangci-lint": true, "markdownlint-cli2": true, "go-license": true,
+			"golangci-lint": true, "markdownlint-cli2": true, "go-license": true, "govulncheck": true,
 		}
 		for _, c := range runner.calls {
 			if postVet[c.name] {
@@ -212,7 +244,11 @@ func TestAll(t *testing.T) {
 		root := buildTree(t, "main.go")
 		runner := &fakeRunner{}
 
-		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
+		in := Inputs{
+			Root:     root,
+			Modules:  []modules.Module{{Dir: "."}},
+			GitFiles: stubGitFiles(),
+		}
 		err := All(
 			t.Context(),
 			runner,
@@ -221,6 +257,7 @@ func TestAll(t *testing.T) {
 			in,
 			markdown.Defaults(),
 			license.Defaults(),
+			errorprefix.Defaults(),
 			stage.Filter{Only: []string{"vet"}},
 			stage.Options{},
 		)
@@ -241,7 +278,11 @@ func TestAll(t *testing.T) {
 		root := buildTree(t, "main.go")
 		runner := &fakeRunner{}
 
-		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
+		in := Inputs{
+			Root:     root,
+			Modules:  []modules.Module{{Dir: "."}},
+			GitFiles: stubGitFiles(),
+		}
 		err := All(
 			t.Context(),
 			runner,
@@ -250,14 +291,15 @@ func TestAll(t *testing.T) {
 			in,
 			markdown.Defaults(),
 			license.Defaults(),
-			stage.Filter{Disabled: []string{"md", "license"}},
+			errorprefix.Defaults(),
+			stage.Filter{Disabled: []string{"md", "license", "vuln"}},
 			stage.Options{},
 		)
 		if err != nil {
 			t.Fatalf("All err: %v", err)
 		}
 		for _, c := range runner.calls {
-			if c.name == "markdownlint-cli2" || c.name == "go-license" {
+			if c.name == "markdownlint-cli2" || c.name == "go-license" || c.name == "govulncheck" {
 				t.Fatalf("unexpected disabled-stage call: %q", c.name)
 			}
 		}
@@ -268,7 +310,11 @@ func TestAll(t *testing.T) {
 		root := buildTree(t, "main.go")
 		runner := &fakeRunner{}
 
-		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
+		in := Inputs{
+			Root:     root,
+			Modules:  []modules.Module{{Dir: "."}},
+			GitFiles: stubGitFiles(),
+		}
 		err := All(
 			t.Context(),
 			runner,
@@ -277,6 +323,7 @@ func TestAll(t *testing.T) {
 			in,
 			markdown.Defaults(),
 			license.Defaults(),
+			errorprefix.Defaults(),
 			stage.Filter{Only: []string{"nonexistent"}},
 			stage.Options{},
 		)
@@ -290,6 +337,15 @@ func TestAll(t *testing.T) {
 			t.Fatalf("recorded %d calls, want 0 (filter validation fails before any stage runs)", len(runner.calls))
 		}
 	})
+}
+
+// stubGitFiles returns a [Inputs.GitFiles] resolver that yields
+// an empty file list. Lets the skip-expiry and error-prefix
+// stages run cleanly in tests without wiring a real git
+// invocation; those stages have their own coverage in
+// `internal/checks/skipexpiry` and `internal/checks/errorprefix`.
+func stubGitFiles() func() ([]string, error) {
+	return func() ([]string, error) { return nil, nil }
 }
 
 // fakeRunner satisfies [xexec.Runner] for tests. It is safe for

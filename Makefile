@@ -1,10 +1,10 @@
 .PHONY: help bootstrap install fmt license generate build clean \
         lint lint-vet lint-go lint-md lint-license \
+        lint-skip-expiry lint-error-prefix lint-vuln \
         tidy check-tidy \
         test test-race test-bench test-fuzz test-coverage test-e2e \
         bench-baseline bench-regression bench-profile \
         check check-coverage check-uncovered check-mutation check-branch \
-        check-skip-expiry check-error-prefix check-vuln \
         release
 
 # ergon dogfoods itself. `go run` keeps the dev loop snappy
@@ -32,7 +32,7 @@ build: ## Compile every module's source (sanity check)
 clean: ## Remove build and coverage artefacts
 	$(ERGON) clean
 
-lint: ## Run the full lint suite (vet + go + md + license; --only / --skip to narrow)
+lint: ## Run the full lint suite (vet + go + md + license + skip-expiry + error-prefix + vuln; --only / --skip to narrow)
 	$(ERGON) lint
 lint-vet: ## Run `go vet ./...` per module only
 	$(ERGON) lint vet
@@ -42,6 +42,12 @@ lint-md: ## Run markdownlint only
 	$(ERGON) lint md
 lint-license: ## Verify SPDX license headers only (no fix)
 	$(ERGON) lint license
+lint-skip-expiry: ## Scan t.Skip() messages for expired YYYY-MM-DD clauses
+	$(ERGON) lint skip-expiry
+lint-error-prefix: ## Scan errors.New() literals for the package-name prefix convention
+	$(ERGON) lint error-prefix
+lint-vuln: ## Run govulncheck per module
+	$(ERGON) lint vuln
 
 tidy: ## Run `go mod tidy` per module
 	$(ERGON) mod tidy
@@ -81,12 +87,6 @@ check-mutation: ## Run gremlins mutation testing per layer (slow)
 	$(ERGON) check mutation
 check-branch: ## Run gobco branch-coverage gating per layer (slow)
 	$(ERGON) check branch
-check-skip-expiry: ## Scan t.Skip() messages for expired YYYY-MM-DD clauses
-	$(ERGON) check skip-expiry
-check-error-prefix: ## Scan errors.New() literals for the package-name prefix convention
-	$(ERGON) check error-prefix
-check-vuln: ## Run govulncheck per module
-	$(ERGON) check vuln
 
 release: ## Bump versions and tag (MESSAGE="..." FLAGS=--major)
 	$(ERGON) release $(if $(MESSAGE),-m "$(MESSAGE)",) $(FLAGS)

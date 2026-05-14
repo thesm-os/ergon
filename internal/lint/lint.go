@@ -2,14 +2,24 @@
 // SPDX-License-Identifier: MIT
 
 // Package lint implements `ergon lint` and its subcommands. The
-// package owns the Go-specific lint steps (vet, golangci-lint) and
-// orchestrates the four-stage default suite — vet, golangci-lint,
-// markdown lint, license verify.
+// package orchestrates the static-analysis suite — every gate
+// that examines source without running tests:
 //
-// Markdown and license reuse the entry points from
-// [go.thesmos.sh/ergon/internal/markdown] and
-// [go.thesmos.sh/ergon/internal/license] so format and lint share
-// a single implementation per tool.
+//   - vet         `go vet ./...` per module.
+//   - go          `golangci-lint run ./...` per module.
+//   - md          markdownlint-cli2 across the workspace.
+//   - license     `go-license --verify` across the workspace.
+//   - skip-expiry AST scan for expired `t.Skip(...expires YYYY-MM-DD)`.
+//   - error-prefix AST scan enforcing the `errors.New("<pkg>: ...")`
+//     convention.
+//   - vuln        `govulncheck ./...` per module.
+//
+// Markdown, license, skip-expiry, error-prefix, and vuln live in
+// their own packages (`internal/markdown`, `internal/license`,
+// `internal/checks/skipexpiry`, `internal/checks/errorprefix`,
+// `internal/checks/vuln`); this package owns the umbrella shape
+// and the per-stage closures that fold each tool's invocation
+// into the shared [stage.Single] / [stage.PerModule] renderers.
 //
 // Aggregation: when fast is false (the default for CI), every
 // per-module / per-substage failure is recorded and rendered into
@@ -25,6 +35,9 @@ import (
 	"io"
 	"path/filepath"
 
+	"go.thesmos.sh/ergon/internal/checks/errorprefix"
+	"go.thesmos.sh/ergon/internal/checks/skipexpiry"
+	"go.thesmos.sh/ergon/internal/checks/vuln"
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/license"
 	"go.thesmos.sh/ergon/internal/markdown"
@@ -41,24 +54,38 @@ type Inputs struct {
 
 	// Modules is the per-module iteration set.
 	Modules []modules.Module
+
+	// GitFiles is a lazy resolver for repo-tracked `.go` files.
+	// Called only when the `skip-expiry` or `error-prefix` stages
+	// remain after filtering; the cobra layer typically wraps
+	// [discover.GitFiles] with a memoising closure so both stages
+	// share a single `git ls-files` invocation. Passing a nil
+	// GitFiles is legal when the caller knows neither stage will
+	// run; a nil call surfaces as a runtime error from the
+	// affected stage rather than a hard panic.
+	GitFiles func() ([]string, error)
 }
 
-// All runs the lint stages in order: [Vet], [Go], markdown.Lint,
-// license.Verify — minus any stages excluded by filter. When
-// opts.Fast is false every (filtered-in) stage runs even if an
-// earlier one failed; when true the first failure aborts the run.
-// The final aggregated error wraps every stage that failed.
+// All runs the lint stages in declared order — minus any stages
+// excluded by filter. When opts.Fast is false every (filtered-in)
+// stage runs even if an earlier one failed; when true the first
+// failure aborts the run. The final aggregated error wraps every
+// stage that failed.
 //
 // filter selects the stages that participate (allow/deny lists
 // from `.ergon.yaml`'s `lint` section composed with the
 // `--only`/`--skip` CLI flags). An empty filter — the zero value —
-// runs every built-in stage, matching the historical behaviour.
-// Unknown stage names in the filter surface
-// [stage.ErrUnknownStage]; the cobra layer wraps that into a
-// usage error.
+// runs every built-in stage. Unknown stage names in the filter
+// surface [stage.ErrUnknownStage]; the cobra layer wraps that
+// into a usage error.
+//
+// in.GitFiles is required when the `skip-expiry` or `error-prefix`
+// stages remain after filtering; the umbrella does not import
+// the discovery layer itself so the caller owns the resolver.
 func All(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
-	in Inputs, markdownCfg markdown.Config, licenseCfg license.Config,
+	in Inputs,
+	markdownCfg markdown.Config, licenseCfg license.Config, errorPrefixCfg errorprefix.Config,
 	filter stage.Filter,
 	opts stage.Options,
 ) error {
@@ -80,6 +107,33 @@ func All(
 				func(_ context.Context, sOut, sErr io.Writer) error {
 					return license.Verify(ctx, runner, sOut, sErr, in.Root, licenseCfg)
 				})
+		}},
+		{Name: "skip-expiry", Run: func() error {
+			return stage.Single(ctx, stdout, opts,
+				"skip-expiry", "scan t.Skip() for an expiry date",
+				"every t.Skip carries a parseable expiry date", "",
+				func(_ context.Context, sOut, sErr io.Writer) error {
+					files, err := in.GitFiles()
+					if err != nil {
+						return err
+					}
+					return skipexpiry.Run(sOut, sErr, in.Root, files)
+				})
+		}},
+		{Name: "error-prefix", Run: func() error {
+			return stage.Single(ctx, stdout, opts,
+				"error-prefix", "errors.New text starts with the package name",
+				"every errors.New carries the expected package prefix", "",
+				func(_ context.Context, sOut, sErr io.Writer) error {
+					files, err := in.GitFiles()
+					if err != nil {
+						return err
+					}
+					return errorprefix.Run(sOut, sErr, in.Root, files, errorPrefixCfg)
+				})
+		}},
+		{Name: "vuln", Run: func() error {
+			return vuln.Run(ctx, runner, stdout, stderr, in.Root, in.Modules, opts)
 		}},
 	}
 	selected, err := filter.Apply(stages)

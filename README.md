@@ -61,17 +61,21 @@ stage names surface as a usage error before any work runs.
 | Group | Members |
 |---|---|
 | Top-level | `bootstrap`, `init`, `clean`, `fmt`, `license`, `generate`, `build`, `release` |
-| `lint` | `vet`, `go`, `md`, `license` |
+| `lint` | `vet`, `go`, `md`, `license`, `skip-expiry`, `error-prefix`, `vuln` |
 | `mod` | `list`, `install`, `tidy`, `verify` |
 | `test` | `race`, `bench`, `fuzz`, `coverage` |
 | `bench` | `baseline`, `regression` |
-| `check` | `coverage`, `mutation`, `skip-expiry`, `error-prefix`, `commit-msg`, `vuln` |
+| `check` | `coverage`, `mutation`, `branch`, `commit-msg` |
 
-The `check` umbrella runs `mod verify`, `lint`, `test`,
-`coverage`, `skip-expiry`, `error-prefix`, and `vuln` in order.
-Mutation testing is excluded from the umbrella because
-`gremlins unleash` takes minutes per layer; invoke
-`ergon check mutation` explicitly when running it.
+The `lint` umbrella holds every static-analysis stage —
+anything that examines source without running tests. The
+`check` umbrella holds the test-derived gates (and orchestrates
+`mod verify`, `lint`, `test`, `coverage` for the full pre-merge
+pipeline). Mutation and branch are excluded from the default
+`check` because each adds minutes per layer; both are appended
+automatically when their `.ergon.yaml` thresholds are declared,
+or invoked explicitly via `ergon check mutation` /
+`ergon check branch`.
 
 ## Scaffolding
 
@@ -96,7 +100,7 @@ showing every section populated.
 | `modules` | Override `go.work` discovery with an explicit list. |
 | `bootstrap` | Extra `go install` targets on top of the built-in tool list, plus optional per-package version pins for deterministic CI installs. |
 | `license` | go-license config path and walk excludes. |
-| `lint` | Stage allow/denylist for `ergon lint` (`enabled` / `disabled`). |
+| `lint` | Stage allow/denylist for `ergon lint` (`enabled` / `disabled`) plus `error_prefix.target_dirs`. |
 | `markdown` | markdownlint-cli2 invocation (globs). |
 | `test` | `go test` knobs: cpu, count, timeout, race-count, bench-count, fuzz-time. |
 | `bench` | Baseline path and per-metric regression policy. |
@@ -105,7 +109,6 @@ showing every section populated.
 | `checks.skips` | Shared structural-skip list (coverage + mutation). |
 | `checks.coverage` | Per-layer line thresholds and the failing-function cap. |
 | `checks.mutation` | Per-layer score / coverage thresholds and `gremlins` invocation policy. |
-| `checks.error_prefix` | Target directories for the error-string-prefix check. |
 | `checks.commit_msg` | Conventional-commit types and the max subject length. |
 
 The repository's own [`.ergon.yaml`](.ergon.yaml) doubles as a

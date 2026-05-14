@@ -11,10 +11,12 @@ import (
 	xexec "go.thesmos.sh/ergon/internal/exec"
 )
 
-// checkErrorPrefixCmd is `ergon check error-prefix`. Enforces the
+// lintErrorPrefixCmd is `ergon lint error-prefix`. Enforces the
 // `errors.New("<pkg>: ...")` convention across every git-visible
-// non-test Go source file.
-var checkErrorPrefixCmd = &cobra.Command{
+// non-test Go source file. The command lives under `lint` because
+// the scan is pure static analysis (AST-based, no compilation or
+// test execution), grouping it with vet and golangci-lint.
+var lintErrorPrefixCmd = &cobra.Command{
 	Use:   "error-prefix",
 	Short: "Enforce the errors.New package-prefix convention",
 	Args:  cobra.NoArgs,
@@ -29,10 +31,10 @@ var checkErrorPrefixCmd = &cobra.Command{
 			return err
 		}
 		return errorprefix.Run(cmd.OutOrStdout(), cmd.ErrOrStderr(),
-			root, files, cfg.Checks.ErrorPrefix)
+			root, files, cfg.Lint.ErrorPrefix)
 	},
 }
 
 func init() {
-	checkCmd.AddCommand(checkErrorPrefixCmd)
+	lintCmd.AddCommand(lintErrorPrefixCmd)
 }

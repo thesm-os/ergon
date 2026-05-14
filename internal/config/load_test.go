@@ -171,6 +171,29 @@ func TestLoad(t *testing.T) {
 		}
 	})
 
+	t.Run("lint.error_prefix.target_dirs populates the nested config", func(t *testing.T) {
+		t.Parallel()
+		path := writeYAML(t, `lint:
+  error_prefix:
+    target_dirs: [internal, pkg]
+`)
+		got, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load err: %v", err)
+		}
+		want := []string{"internal", "pkg"}
+		if len(got.Lint.ErrorPrefix.TargetDirs) != len(want) {
+			t.Fatalf("Lint.ErrorPrefix.TargetDirs = %+v, want %+v",
+				got.Lint.ErrorPrefix.TargetDirs, want)
+		}
+		for i, w := range want {
+			if got.Lint.ErrorPrefix.TargetDirs[i] != w {
+				t.Errorf("Lint.ErrorPrefix.TargetDirs[%d] = %q, want %q",
+					i, got.Lint.ErrorPrefix.TargetDirs[i], w)
+			}
+		}
+	})
+
 	t.Run("lint.enabled and lint.disabled populate the filter fields", func(t *testing.T) {
 		t.Parallel()
 		path := writeYAML(t, `lint:
