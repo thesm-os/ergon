@@ -40,44 +40,44 @@ type Config struct {
 	// which ergon writes coverage and build artifacts (`.ergon/`,
 	// `.eidos/`, ...) and appears in help banners. Defaults at
 	// runtime to the basename of the repository root.
-	Name string `mapstructure:"name"`
+	Name string `yaml:"name"`
 
 	// Modules optionally fixes the module set ergon iterates,
 	// bypassing `go.work` discovery. Paths are relative to the
 	// repository root; `.` denotes the root module. When empty,
 	// discovery reads `go.work` (or falls back to a single root
 	// entry).
-	Modules []string `mapstructure:"modules"`
+	Modules []string `yaml:"modules"`
 
 	// Bootstrap configures `ergon bootstrap`. See
 	// [bootstrap.Config] for field semantics.
-	Bootstrap bootstrap.Config `mapstructure:"bootstrap"`
+	Bootstrap bootstrap.Config `yaml:"bootstrap"`
 
 	// License configures `ergon license` (apply) and
 	// `ergon lint license` (verify). See [license.Config] for
 	// field semantics.
-	License license.Config `mapstructure:"license"`
+	License license.Config `yaml:"license"`
 
 	// Markdown configures the markdownlint-cli2 invocation `ergon
 	// fmt` and `ergon lint md` share. See [markdown.Config] for
 	// field semantics.
-	Markdown markdown.Config `mapstructure:"markdown"`
+	Markdown markdown.Config `yaml:"markdown"`
 
 	// Test configures `ergon test` and its subcommands. See
 	// [test.Config] for field semantics.
-	Test test.Config `mapstructure:"test"`
+	Test test.Config `yaml:"test"`
 
 	// Bench configures `ergon bench baseline` and `ergon bench
 	// regression`. See [bench.Config].
-	Bench bench.Config `mapstructure:"bench"`
+	Bench bench.Config `yaml:"bench"`
 
 	// Release configures `ergon release`. See [release.Config];
 	// the only field today is a module scope that overrides
 	// [Config.Modules] for release only.
-	Release release.Config `mapstructure:"release"`
+	Release release.Config `yaml:"release"`
 
 	// Checks configures the `ergon check *` subcommands.
-	Checks ChecksConfig `mapstructure:"checks"`
+	Checks ChecksConfig `yaml:"checks"`
 }
 
 // ChecksConfig groups the per-check configs so each subsystem's
@@ -94,29 +94,29 @@ type ChecksConfig struct {
 	// and mutation consult. A path matching any [policy.Exclude]
 	// is dropped from the coverage threshold check and excluded
 	// from gremlins via `--exclude-files`.
-	Excludes []policy.Exclude `mapstructure:"excludes"`
+	Excludes []policy.Exclude `yaml:"excludes"`
 
 	// Skips is the shared structural-skip list both gates
 	// consult. Coverage applies the (FuncGlob, FileGlob) pair
 	// function-by-function; mutation, lacking a per-function
 	// exclusion knob in gremlins, applies the FileGlob alone.
-	Skips []policy.Skip `mapstructure:"skips"`
+	Skips []policy.Skip `yaml:"skips"`
 
 	// Coverage configures `ergon check coverage`. See
 	// [coverage.Config].
-	Coverage coverage.Config `mapstructure:"coverage"`
+	Coverage coverage.Config `yaml:"coverage"`
 
 	// Mutation configures `ergon check mutation`. See
 	// [mutation.Config].
-	Mutation mutation.Config `mapstructure:"mutation"`
+	Mutation mutation.Config `yaml:"mutation"`
 
 	// ErrorPrefix configures `ergon check error-prefix`. See
 	// [errorprefix.Config].
-	ErrorPrefix errorprefix.Config `mapstructure:"error_prefix"`
+	ErrorPrefix errorprefix.Config `yaml:"error_prefix"`
 
 	// CommitMsg configures `ergon check commit-msg`. See
 	// [commitmsg.Config].
-	CommitMsg commitmsg.Config `mapstructure:"commit_msg"`
+	CommitMsg commitmsg.Config `yaml:"commit_msg"`
 }
 
 // Defaults returns the Config populated with each subsystem's own

@@ -23,12 +23,12 @@ type Config struct {
 	// [Layer.Path] is a glob (`...` recursive, `*` single segment)
 	// matched against the repo-relative path of every function in
 	// the merged coverprofile. Longest-prefix wins.
-	Packages []Layer `mapstructure:"packages"`
+	Packages []Layer `yaml:"packages"`
 
 	// TopN caps the per-target failing-function list so the
 	// report stays scannable. A surplus is summarised as
 	// "+N more functions". Defaults to 10.
-	TopN int `mapstructure:"top_n"`
+	TopN int `yaml:"top_n"`
 }
 
 // Layer pairs a path glob with the minimum statement-coverage
@@ -40,19 +40,19 @@ type Config struct {
 // behind RequireBranch.
 type Layer struct {
 	// Path is the glob the threshold applies to.
-	Path string `mapstructure:"path"`
+	Path string `yaml:"path"`
 
 	// Line is the minimum statement-coverage percentage every
 	// function in this layer must reach.
-	Line int `mapstructure:"line"`
+	Line int `yaml:"line"`
 
 	// Branch is the minimum branch-coverage percentage. Reserved
 	// for the future `gobco`-backed gate; ignored today.
-	Branch int `mapstructure:"branch"`
+	Branch int `yaml:"branch"`
 
 	// RequireBranch turns the branch gate on when the runner
 	// supports it. Today the field is recorded but unused.
-	RequireBranch bool `mapstructure:"require_branch"`
+	RequireBranch bool `yaml:"require_branch"`
 }
 
 // Defaults returns an empty Config. Coverage thresholds are an

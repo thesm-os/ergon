@@ -36,11 +36,11 @@ import (
 // for the translation.
 type Exclude struct {
 	// Path is the glob the rule applies to.
-	Path string `mapstructure:"path"`
+	Path string `yaml:"path"`
 
 	// Reason documents why the path is exempt. Surfaces nowhere
 	// today but is required so the YAML reads as self-explanatory.
-	Reason string `mapstructure:"reason"`
+	Reason string `yaml:"reason"`
 }
 
 // Skip declares a structural-skip rule: a function whose name
@@ -61,13 +61,13 @@ type Exclude struct {
 // matching file is excluded.
 type Skip struct {
 	// Label names the rule for the per-target report.
-	Label string `mapstructure:"label"`
+	Label string `yaml:"label"`
 
 	// FuncGlob is matched against the function's bare name.
-	FuncGlob string `mapstructure:"func_glob"`
+	FuncGlob string `yaml:"func_glob"`
 
 	// FileGlob is matched against the function's source file path.
-	FileGlob string `mapstructure:"file_glob"`
+	FileGlob string `yaml:"file_glob"`
 }
 
 // MatchesExclude reports whether path matches any exclude's Path

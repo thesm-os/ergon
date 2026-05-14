@@ -16,7 +16,7 @@ type Config struct {
 	// TargetDirs is the list of directories (relative to the
 	// repository root) to scan. The walker recurses into each.
 	// Defaults to `[.]` (the entire repository).
-	TargetDirs []string `mapstructure:"target_dirs"`
+	TargetDirs []string `yaml:"target_dirs"`
 }
 
 // Defaults returns the Config ergon uses when a repository's

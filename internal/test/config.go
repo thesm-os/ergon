@@ -18,31 +18,31 @@ type Config struct {
 	// CPU bounds the parallelism `go test -cpu=N` exposes to each
 	// package. Higher values exercise more concurrent paths; lower
 	// values reduce flakiness on noisy CI runners.
-	CPU int `mapstructure:"cpu"`
+	CPU int `yaml:"cpu"`
 
 	// Count repeats each test the given number of times via
 	// `go test -count=N`. Useful for flushing out flakes that pass
 	// on the first iteration.
-	Count int `mapstructure:"count"`
+	Count int `yaml:"count"`
 
 	// Timeout is the per-package deadline (`go test -timeout=...`).
 	// Stops one runaway test from hanging the whole suite.
-	Timeout time.Duration `mapstructure:"timeout"`
+	Timeout time.Duration `yaml:"timeout"`
 
 	// RaceCount is the iteration count for `ergon test race`. Race
 	// tests benefit from extra repetitions because reorderings the
 	// detector can observe are stochastic.
-	RaceCount int `mapstructure:"race_count"`
+	RaceCount int `yaml:"race_count"`
 
 	// BenchCount is the per-target run count for `ergon bench`
 	// (and `ergon test bench` when sampling). More samples tighten
 	// benchstat's confidence bands at the cost of CI time.
-	BenchCount int `mapstructure:"bench_count"`
+	BenchCount int `yaml:"bench_count"`
 
 	// FuzzTime is the per-target wall-clock budget for
 	// `ergon test fuzz`. Each Fuzz* target runs sequentially for
 	// FuzzTime before the runner moves on.
-	FuzzTime time.Duration `mapstructure:"fuzz_time"`
+	FuzzTime time.Duration `yaml:"fuzz_time"`
 }
 
 // Defaults returns the Config ergon uses when a repository's

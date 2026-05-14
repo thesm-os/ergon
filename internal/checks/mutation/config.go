@@ -16,12 +16,12 @@ import "runtime"
 // treating zero layers as a hard fail.
 type Config struct {
 	// Packages declares the per-layer thresholds.
-	Packages []Layer `mapstructure:"packages"`
+	Packages []Layer `yaml:"packages"`
 
 	// Gremlins controls how ergon invokes the gremlins binary
 	// (workers, test-cpu, timeout, exclude-files). gremlins itself
 	// has no config file; ergon owns the policy.
-	Gremlins GremlinsConfig `mapstructure:"gremlins"`
+	Gremlins GremlinsConfig `yaml:"gremlins"`
 }
 
 // Layer pairs a path glob with the minimum acceptable mutation
@@ -47,16 +47,16 @@ type Layer struct {
 	// Path is the glob the thresholds apply to. Today only the
 	// `<dir>/...` shape is honoured; the runner trims the suffix
 	// and uses the resulting directory as gremlins' target.
-	Path string `mapstructure:"path"`
+	Path string `yaml:"path"`
 
 	// Score is the minimum test-efficacy percentage. 100 means
 	// every reached mutant must be killed.
-	Score int `mapstructure:"score"`
+	Score int `yaml:"score"`
 
 	// Coverage is the minimum mutator-coverage percentage. Zero
 	// means "default to Score" so the single-threshold shape
 	// stays usable.
-	Coverage int `mapstructure:"coverage"`
+	Coverage int `yaml:"coverage"`
 }
 
 // GremlinsConfig carries the per-invocation tuning ergon passes
@@ -72,19 +72,19 @@ type GremlinsConfig struct {
 	// gremlins runs. gremlins defaults to NumCPU; ergon bounds it
 	// to NumCPU/4 (floor 2) so the rest of the developer's session
 	// has headroom and back-to-back layer runs do not contend.
-	Workers int `mapstructure:"workers"`
+	Workers int `yaml:"workers"`
 
 	// TestCPU is the `go test -cpu` setting each worker uses. Two
 	// keeps a 16-core machine from spawning 256-way parallelism
 	// per layer.
-	TestCPU int `mapstructure:"test_cpu"`
+	TestCPU int `yaml:"test_cpu"`
 
 	// TimeoutCoefficient is gremlins' `--timeout-coefficient`. The
 	// gremlins default of 3 is too aggressive for tests that
 	// include rapid property-based tests or build-info parsing —
 	// slow-but-finite tests time out spuriously and inflate the
 	// LIVED count. 30 lets elite tests actually KILL their mutants.
-	TimeoutCoefficient int `mapstructure:"timeout_coefficient"`
+	TimeoutCoefficient int `yaml:"timeout_coefficient"`
 }
 
 // Defaults returns the Config ergon uses when a repository's

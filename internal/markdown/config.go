@@ -20,7 +20,7 @@ type Config struct {
 	// Globs is the argument list handed to markdownlint-cli2. The
 	// defaults from [Defaults] cover the common exclude set; repos
 	// with extra carve-outs override or extend the list.
-	Globs []string `mapstructure:"globs"`
+	Globs []string `yaml:"globs"`
 }
 
 // Defaults returns the Config ergon uses when a repository's

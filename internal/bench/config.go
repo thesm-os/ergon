@@ -18,11 +18,11 @@ type Config struct {
 	// BaselinePath is the repo-relative path where
 	// `ergon bench baseline` writes the pinned reference output.
 	// `ergon bench regression` reads it back at compare time.
-	BaselinePath string `mapstructure:"baseline_path"`
+	BaselinePath string `yaml:"baseline_path"`
 
 	// Thresholds is the per-metric regression gate
 	// `ergon bench regression` enforces.
-	Thresholds Thresholds `mapstructure:"thresholds"`
+	Thresholds Thresholds `yaml:"thresholds"`
 }
 
 // Thresholds expresses the per-metric regression policy. Each
@@ -48,18 +48,18 @@ type Thresholds struct {
 	// TimePercent is the hard-fail threshold for the `sec/op`
 	// metric. Significant deltas at or above this percent fail
 	// the run.
-	TimePercent float64 `mapstructure:"time_percent"`
+	TimePercent float64 `yaml:"time_percent"`
 
 	// BytesPercent is the advisory threshold for the `B/op` metric.
 	// Deltas at or above this percent surface as warnings; the
 	// metric is never hard-gated.
-	BytesPercent float64 `mapstructure:"bytes_percent"`
+	BytesPercent float64 `yaml:"bytes_percent"`
 
 	// AllocsPercent is the hard-fail threshold for the `allocs/op`
 	// metric. Significant deltas strictly above this percent fail
 	// the run. Defaults to zero — any statistically-significant
 	// allocation increase is a regression.
-	AllocsPercent float64 `mapstructure:"allocs_percent"`
+	AllocsPercent float64 `yaml:"allocs_percent"`
 }
 
 // Defaults returns the Config ergon uses when a repository's

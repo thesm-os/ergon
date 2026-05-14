@@ -17,7 +17,7 @@ type Config struct {
 	// Paths follow the same conventions as the global field:
 	// repository-relative, `.` for the root module, no leading
 	// `./`.
-	Modules []string `mapstructure:"modules"`
+	Modules []string `yaml:"modules"`
 }
 
 // Defaults returns the zero-value [Config]. Release has no defaults

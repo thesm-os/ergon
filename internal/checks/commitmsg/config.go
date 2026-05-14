@@ -28,7 +28,7 @@ type Config struct {
 	// Types is the closed set of accepted commit types. The
 	// subject must match `<type>(<scope>?)!?: <description>`
 	// where <type> is one of these strings.
-	Types []string `mapstructure:"types"`
+	Types []string `yaml:"types"`
 
 	// Scopes optionally constrains the `(scope)` group to a closed
 	// set. An empty slice (the default) leaves scopes free-form —
@@ -36,17 +36,17 @@ type Config struct {
 	// accepted. A non-empty slice mirrors commitlint's
 	// `scope-enum` rule: when present, the scope MUST be one of
 	// these strings; commits without a scope still pass.
-	Scopes []string `mapstructure:"scopes"`
+	Scopes []string `yaml:"scopes"`
 
 	// MaxSubjectLength is the maximum length (in bytes) of the
 	// commit subject line. Subjects longer than this are rejected;
 	// the conventional limit is 72.
-	MaxSubjectLength int `mapstructure:"max_subject_length"`
+	MaxSubjectLength int `yaml:"max_subject_length"`
 
 	// BodyMaxLineLength is the maximum length (in bytes) of any
 	// individual line in the commit body or footer. The
 	// conventional limit is 100. A zero value disables the check.
-	BodyMaxLineLength int `mapstructure:"body_max_line_length"`
+	BodyMaxLineLength int `yaml:"body_max_line_length"`
 }
 
 // Defaults returns the Config ergon uses when a repository's

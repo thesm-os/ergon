@@ -17,7 +17,7 @@ type Config struct {
 	// install after the standard suite. Order is preserved; failures
 	// abort the run at the first broken tool so partial states are
 	// easy to reason about.
-	ExtraTools []ToolSpec `mapstructure:"extra_tools"`
+	ExtraTools []ToolSpec `yaml:"extra_tools"`
 }
 
 // ToolSpec names one Go tool installable via `go install`. Pkg is
@@ -26,12 +26,12 @@ type Config struct {
 // pinned semver tag for repeatable builds).
 type ToolSpec struct {
 	// Pkg is the import path passed to `go install`.
-	Pkg string `mapstructure:"pkg"`
+	Pkg string `yaml:"pkg"`
 
 	// Version is the suffix after `@`. An empty value is treated
 	// as `latest` so callers can omit the field for unpinned dev
 	// tooling.
-	Version string `mapstructure:"version"`
+	Version string `yaml:"version"`
 }
 
 // Defaults returns the Config ergon uses when a repository's

@@ -16,7 +16,7 @@ package license
 type Config struct {
 	// ConfigFile is the path to go-license's YAML config, relative
 	// to the repository root. Defaults to `.go-license.yml`.
-	ConfigFile string `mapstructure:"config_file"`
+	ConfigFile string `yaml:"config_file"`
 
 	// ExcludeDirs lists directory basenames to skip during the
 	// source walk. The walker prunes the entire subtree below any
@@ -24,13 +24,13 @@ type Config struct {
 	// replace the default set; matching is by basename, not path,
 	// so an entry like `vendor` excludes every `vendor/` directory
 	// at any depth.
-	ExcludeDirs []string `mapstructure:"exclude_dirs"`
+	ExcludeDirs []string `yaml:"exclude_dirs"`
 
 	// ExcludeFiles lists glob patterns (matched against the file's
 	// basename via [filepath.Match]) for sources to skip during
 	// the walk. Used for generated-file suffixes; a repo with
 	// project-specific generators (e.g. `*.pb.go`) appends to it.
-	ExcludeFiles []string `mapstructure:"exclude_files"`
+	ExcludeFiles []string `yaml:"exclude_files"`
 }
 
 // Defaults returns the Config ergon uses when a repository's
