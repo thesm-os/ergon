@@ -100,6 +100,27 @@ func planEntryFor(
 
 	entry := PlanEntry{Module: m, OldVersion: old}
 
+	// --version pins every non-skipped module at the supplied
+	// version, bypassing bump-level resolution entirely. The only
+	// per-module input still consulted is `--bump MODULE=none`,
+	// which lets the caller skip a specific module from the
+	// coordinated release.
+	if opts.Version != "" {
+		if override, ok := opts.Overrides[m.Dir]; ok && override == BumpNone {
+			entry.Reason = fmt.Sprintf("--bump %s=none override", m.Dir)
+			entry.NewVersion = old
+			return entry, nil
+		}
+		forced, vErr := VersionFromTag(opts.Version)
+		if vErr != nil {
+			return PlanEntry{}, fmt.Errorf("parse --version %q: %w", opts.Version, vErr)
+		}
+		entry.NewVersion = forced
+		entry.Tag = m.TagPrefix() + "v" + forced
+		entry.Reason = fmt.Sprintf("--version v%s pin", forced)
+		return entry, nil
+	}
+
 	level, reason, skipReason, err := resolveLevel(ctx, runner, root, m, mods, opts, prevTag)
 	if err != nil {
 		return PlanEntry{}, err
@@ -241,10 +262,18 @@ func ApplyPlan(
 		fmt.Fprintln(w, "(nothing to tag)")
 		return nil
 	}
+	// Probe signing once upfront so a broken setup aborts before
+	// the first tag is created (matches [ApplyPipeline]'s flow).
+	if err := PreflightTagSigning(ctx, runner, root); err != nil {
+		return err
+	}
 	fmt.Fprintln(w, "Tagging...")
 	for _, e := range tags {
 		body := e.Tag + "\n\n" + opts.Message
-		if err := Tag(ctx, runner, root, e.Tag, body); err != nil {
+		// EnsureTag is idempotent: a tag left from a prior partial
+		// run that already points at HEAD is silently preserved
+		// rather than re-created.
+		if err := EnsureTag(ctx, runner, root, e.Tag, body); err != nil {
 			return fmt.Errorf("git tag %s: %w", e.Tag, err)
 		}
 		fmt.Fprintln(w, "  ", e.Tag)

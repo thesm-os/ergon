@@ -20,6 +20,7 @@ var releaseFlags struct {
 	forceMinor bool
 	forcePatch bool
 	bumps      []string
+	version    string
 	dryRun     bool
 	noTag      bool
 	noBump     bool
@@ -47,6 +48,7 @@ var releaseCmd = &cobra.Command{
 			releaseFlags.forceMinor,
 			releaseFlags.forcePatch,
 			releaseFlags.bumps,
+			releaseFlags.version,
 			releaseFlags.dryRun,
 			releaseFlags.noTag,
 			releaseFlags.noBump,
@@ -85,6 +87,8 @@ func init() {
 		"Force patch bump for every module")
 	releaseCmd.Flags().StringSliceVar(&releaseFlags.bumps, "bump", nil,
 		"Per-module bump override (MODULE=LEVEL; repeatable)")
+	releaseCmd.Flags().StringVar(&releaseFlags.version, "version", "",
+		"Pin every module to this version (vX.Y.Z) regardless of bump inference; useful for coordinated releases and resuming partial failures")
 	releaseCmd.Flags().BoolVar(&releaseFlags.dryRun, "dry-run", false,
 		"Print the plan; change nothing")
 	releaseCmd.Flags().BoolVar(&releaseFlags.noTag, "no-tag", false,

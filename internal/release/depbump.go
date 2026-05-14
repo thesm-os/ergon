@@ -69,6 +69,13 @@ func ApplyPipeline(
 		}
 	}
 
+	// Probe `git tag -a` upfront so a broken signing setup aborts
+	// before any state changes — better to fail fast than to fail
+	// mid-pipeline with half-created tags requiring manual cleanup.
+	if err := PreflightTagSigning(ctx, runner, root); err != nil {
+		return err
+	}
+
 	// Pin every non-skipped entry's new version so later layers
 	// can rewrite their require lines against a stable map.
 	versions := map[string]string{}
@@ -135,10 +142,14 @@ func ApplyPipeline(
 		}
 
 		// Step 4: tag this layer at the (possibly new) HEAD.
+		// EnsureTag is idempotent — a tag left behind by a prior
+		// partial run that targeted the same version is preserved
+		// (when it points at HEAD) so retrying does not re-tag or
+		// move the existing tag.
 		for _, dir := range ready {
 			entry := planEntry(plan, dir)
 			body := entry.Tag + "\n\n" + opts.Message
-			if err := Tag(ctx, runner, root, entry.Tag, body); err != nil {
+			if err := EnsureTag(ctx, runner, root, entry.Tag, body); err != nil {
 				return fmt.Errorf("git tag %s: %w", entry.Tag, err)
 			}
 			released[dir] = true

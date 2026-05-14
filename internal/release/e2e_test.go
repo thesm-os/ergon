@@ -177,6 +177,106 @@ require example.com/myrepo v0.0.0
 	}
 }
 
+// TestApplyPipelineIdempotentRetry pins the partial-failure
+// recovery path. Simulates a prior run that created the root
+// tag and then failed before tagging the submodule (a common
+// shape for GPG / network / unrelated git failures mid-
+// pipeline). The retry uses --version to pin the target value
+// so [BuildPlan] does not bump past the partially-published
+// version.
+//
+// Verifies:
+//   - the already-existing root tag is preserved (not re-created
+//     or moved);
+//   - the submodule is tagged at the bump commit produced this
+//     run;
+//   - exactly one chore(release) commit lands (not one per run);
+//   - the submodule's go.mod require is rewritten to the pinned
+//     root version.
+func TestApplyPipelineIdempotentRetry(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH; skipping e2e release test")
+	}
+
+	root := t.TempDir()
+	runner := xexec.Command{}
+	ctx := t.Context()
+
+	writeFile(t, root, "go.mod", `module example.com/myrepo
+
+go 1.26
+`)
+	writeFile(t, root, "main.go", "package myrepo\n")
+	writeFile(t, root, "cli/go.mod", `module example.com/myrepo/cli
+
+go 1.26
+
+require example.com/myrepo v0.0.0
+`)
+	writeFile(t, root, "cli/main.go", "package main\n")
+
+	git(t, root, "init", "-q", "-b", "main")
+	git(t, root, "config", "user.name", "ergon-test")
+	git(t, root, "config", "user.email", "test@example.com")
+	git(t, root, "config", "commit.gpgsign", "false")
+	git(t, root, "config", "tag.gpgsign", "false")
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-q", "-m", "feat: initial")
+	initialHEAD := strings.TrimSpace(gitOut(t, root, "rev-parse", "HEAD"))
+
+	// Simulate the partial-failure state: a prior run successfully
+	// tagged root v0.1.0 at the initial commit, then aborted before
+	// tagging the submodule.
+	git(t, root, "tag", "-a", "v0.1.0", "-m", "prior partial run")
+
+	// Retry with --version pinning the same target value. Without
+	// the version pin, BuildPlan would compute v0.1.0 -> v0.1.1
+	// for root (since root now has a tag) and split the release
+	// across adjacent versions.
+	mods := []modules.Module{{Dir: "."}, {Dir: "cli"}}
+	opts := release.Options{
+		Message: "retry the partial release",
+		Version: "v0.1.0",
+		NoPush:  true,
+	}
+	plan, err := release.BuildPlan(ctx, runner, root, mods, opts)
+	if err != nil {
+		t.Fatalf("BuildPlan err: %v", err)
+	}
+	if err := release.ApplyPipeline(ctx, runner, root, io.Discard, mods, plan, opts); err != nil {
+		t.Fatalf("ApplyPipeline (retry) err: %v", err)
+	}
+
+	// Root tag still at the initial commit (idempotent skip).
+	if got := strings.TrimSpace(gitOut(t, root, "rev-parse", "v0.1.0^{commit}")); got != initialHEAD {
+		t.Errorf("v0.1.0 moved to %s; want it preserved at initial HEAD %s", got, initialHEAD)
+	}
+
+	// Submodule tag landed at a new commit (the bump commit).
+	assertTagExists(t, root, "cli/v0.1.0")
+	cliTagCommit := strings.TrimSpace(gitOut(t, root, "rev-parse", "cli/v0.1.0^{commit}"))
+	if cliTagCommit == initialHEAD {
+		t.Errorf("cli/v0.1.0 points at initial commit; expected bump commit between initial and tag")
+	}
+
+	// Exactly one chore(release) commit reachable from HEAD —
+	// the retry must not produce a second one.
+	choreCount := strings.TrimSpace(gitOut(t, root, "log", "--oneline", "--grep=chore(release)"))
+	choreLines := strings.Split(choreCount, "\n")
+	if len(choreLines) != 1 || choreLines[0] == "" {
+		t.Errorf("found %d chore(release) commits, want exactly 1:\n%s", len(choreLines), choreCount)
+	}
+
+	// Submodule's go.mod require rewritten to the pinned version.
+	cliGoMod, err := os.ReadFile(filepath.Join(root, "cli", "go.mod"))
+	if err != nil {
+		t.Fatalf("read cli/go.mod: %v", err)
+	}
+	if !strings.Contains(string(cliGoMod), "example.com/myrepo v0.1.0") {
+		t.Errorf("cli/go.mod missing rewritten require to v0.1.0:\n%s", cliGoMod)
+	}
+}
+
 // TestApplyPipelineRejectsDirtyTree pins the dirty-HEAD safety
 // check. The bump pipeline creates its own commit; running with
 // unrelated dirty files conflates them, which corrupts release

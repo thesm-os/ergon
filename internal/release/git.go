@@ -98,9 +98,126 @@ func parseScopedCommits(raw string) []CommitInfo {
 // Tag creates an annotated tag named name with body message. The
 // commit it points at is the current HEAD; the caller arranges for
 // the bump commit to be HEAD before calling.
+//
+// Prefer [EnsureTag] over Tag at call sites that may be retried —
+// EnsureTag is idempotent when the tag already exists at HEAD,
+// which is exactly the state a partial prior run leaves behind.
 func Tag(ctx context.Context, runner xexec.Runner, root, name, message string) error {
 	_, err := runGit(ctx, runner, root, "tag", "-a", "-m", message, name)
 	return err
+}
+
+// TagCommit returns the commit a tag points at and whether the
+// tag exists. For an annotated tag the returned SHA is the
+// underlying commit (the tag object itself is dereferenced via
+// `git rev-list -n 1`); for a lightweight tag the SHA is the
+// referenced commit directly. Used by [EnsureTag] to detect tags
+// left behind by a prior partial run so retries can skip them.
+func TagCommit(ctx context.Context, runner xexec.Runner, root, name string) (commit string, exists bool, err error) {
+	out, err := runGit(ctx, runner, root, "tag", "-l", name)
+	if err != nil {
+		return "", false, err
+	}
+	if strings.TrimSpace(out) == "" {
+		return "", false, nil
+	}
+	out, err = runGit(ctx, runner, root, "rev-list", "-n", "1", "refs/tags/"+name)
+	if err != nil {
+		return "", false, err
+	}
+	return strings.TrimSpace(out), true, nil
+}
+
+// HeadCommit returns the commit SHA at HEAD. Used by [EnsureTag]
+// to verify an existing tag points at the commit we want to tag,
+// rather than silently moving a published tag.
+func HeadCommit(ctx context.Context, runner xexec.Runner, root string) (string, error) {
+	out, err := runGit(ctx, runner, root, "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// EnsureTag creates an annotated tag named name with body message
+// at the current HEAD, but is idempotent when the tag already
+// exists at HEAD — exactly the state a prior partial release run
+// leaves behind. Three outcomes:
+//
+//   - Tag does not exist: creates it via [Tag].
+//   - Tag exists at HEAD: returns nil (no-op).
+//   - Tag exists at a different commit: returns an error so the
+//     caller surfaces the conflict rather than silently moving
+//     a published tag.
+//
+// The error path on commit-mismatch carries shortened SHAs of
+// both the existing tag's commit and HEAD so the user can locate
+// the discrepancy without re-running git themselves.
+func EnsureTag(ctx context.Context, runner xexec.Runner, root, name, message string) error {
+	existing, exists, err := TagCommit(ctx, runner, root, name)
+	if err != nil {
+		return err
+	}
+	if exists {
+		head, err := HeadCommit(ctx, runner, root)
+		if err != nil {
+			return err
+		}
+		if existing == head {
+			return nil // idempotent: already at the right commit
+		}
+		return fmt.Errorf(
+			"release: tag %s already exists at %s but HEAD is %s; "+
+				"delete the tag or rewind HEAD before retrying",
+			name, shortSHA(existing), shortSHA(head),
+		)
+	}
+	return Tag(ctx, runner, root, name, message)
+}
+
+// PreflightTagSigning probes whether `git tag -a` can complete
+// against the current repository configuration. Called at the
+// start of the release pipeline so a broken signing setup fails
+// fast — much cleaner than aborting mid-release with half-created
+// tags requiring manual cleanup.
+//
+// The probe creates an ephemeral annotated tag named with a
+// reserved sentinel, then deletes it. Both steps must succeed for
+// the preflight to pass; either failure wraps the underlying git
+// error with a hint about the most common cause (GPG agent
+// unavailable, signing key missing).
+//
+// Safe to call repeatedly: a leftover probe tag from a previous
+// aborted preflight is cleaned up before the new probe runs.
+func PreflightTagSigning(ctx context.Context, runner xexec.Runner, root string) error {
+	const probeName = "__ergon_release_signing_probe__"
+
+	// Defensively clean up a leftover probe from a prior aborted
+	// run before creating a fresh one. Ignore errors: the tag
+	// likely doesn't exist (which is the desired starting state).
+	_, _ = runGit(ctx, runner, root, "tag", "-d", probeName)
+
+	if _, err := runGit(ctx, runner, root, "tag", "-a", "-m", "ergon signing preflight", probeName); err != nil {
+		return fmt.Errorf(
+			"release: tag-signing preflight failed (check GPG / signing-key setup): %w",
+			err,
+		)
+	}
+	if _, err := runGit(ctx, runner, root, "tag", "-d", probeName); err != nil {
+		return fmt.Errorf("release: clean up signing probe tag %q: %w", probeName, err)
+	}
+	return nil
+}
+
+// shortSHA truncates a git SHA to the first 12 characters for
+// human-readable error messages. Returns the input unchanged when
+// it is shorter than 12 characters (e.g. a synthetic SHA used in
+// tests).
+func shortSHA(sha string) string {
+	if len(sha) >= 12 {
+		return sha[:12]
+	}
+	return sha
 }
 
 // runGit shells out to git via runner with the supplied args. The

@@ -377,8 +377,11 @@ func TestApplyPlan(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ApplyPlan err: %v", err)
 		}
-		if len(runner.calls) != 2 {
-			t.Fatalf("calls = %d, want 2", len(runner.calls))
+		// Filter out the preflight probe's tag operations and any
+		// idempotency-check `git tag -l` / `git rev-list` calls;
+		// count only the real annotated-tag creations.
+		if got := countRealTagCreates(runner.calls); got != 2 {
+			t.Fatalf("real tag creations = %d, want 2", got)
 		}
 	})
 
@@ -415,7 +418,15 @@ func TestApplyPlan(t *testing.T) {
 
 	t.Run("git failure wraps the failing tag name", func(t *testing.T) {
 		t.Parallel()
-		runner := &planFakeRunner{runErr: errors.New("tag exists")}
+		// Let the preflight probe succeed; fail only on real tag
+		// creations so the error path exercised is the one inside
+		// ApplyPlan's loop (not the upfront preflight).
+		runner := &planFakeRunner{decide: func(_ string, args []string) error {
+			if len(args) >= 5 && args[0] == "tag" && args[1] == "-a" && args[4] != signingProbeName {
+				return errors.New("tag exists")
+			}
+			return nil
+		}}
 		var buf strings.Builder
 		err := ApplyPlan(t.Context(), runner, "/repo", &buf,
 			[]PlanEntry{{Tag: "v1.0.0"}}, Options{Message: "rel"})
@@ -431,13 +442,16 @@ func TestApplyPlan(t *testing.T) {
 // planFakeRunner is a concurrency-safe [xexec.Runner] reused
 // across the plan tests. `output` echoes for every call;
 // `perCallOutputs` lets a multi-stage test (LastTag → ScopedCommits)
-// inject one body per Run invocation in order.
+// inject one body per Run invocation in order; `decide` lets a
+// test inject per-call error decisions (e.g. let the
+// preflight-signing probe succeed while a later real tag fails).
 type planFakeRunner struct {
 	mu             sync.Mutex
 	calls          []gitCall
 	output         string
 	perCallOutputs []string
 	runErr         error
+	decide         func(name string, args []string) error
 }
 
 func (f *planFakeRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
@@ -448,11 +462,38 @@ func (f *planFakeRunner) Run(_ context.Context, opts xexec.Options, name string,
 	if idx < len(f.perCallOutputs) {
 		body = f.perCallOutputs[idx]
 	}
+	decide := f.decide
 	f.mu.Unlock()
 	if opts.Stdout != nil && body != "" {
 		_, _ = opts.Stdout.Write([]byte(body))
 	}
+	if decide != nil {
+		return decide(name, args)
+	}
 	return f.runErr
+}
+
+// countRealTagCreates counts `git tag -a -m <msg> <name>` calls
+// whose name is not the [PreflightTagSigning] probe sentinel.
+// Used by tests that need to assert on real tag creations
+// without being thrown off by the preflight probe operations.
+const signingProbeName = "__ergon_release_signing_probe__"
+
+func countRealTagCreates(calls []gitCall) int {
+	n := 0
+	for _, c := range calls {
+		if c.name != "git" || len(c.args) < 5 {
+			continue
+		}
+		if c.args[0] != "tag" || c.args[1] != "-a" {
+			continue
+		}
+		if c.args[4] == signingProbeName {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 func (*planFakeRunner) LookPath(name string) (string, error) {

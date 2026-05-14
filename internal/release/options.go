@@ -62,15 +62,41 @@ type Options struct {
 	// release history. Pass --allow-dirty when you know what you
 	// are doing.
 	AllowDirty bool
+
+	// Version, when non-empty, overrides every module's bump
+	// resolution and pins every non-skipped module to this exact
+	// version. Useful for two cases the bump-inference path
+	// handles poorly:
+	//
+	//   - Coordinated releases ("ship v1.0.2 across every module
+	//     regardless of per-module commit scope"). Without this
+	//     flag, modules with no in-scope commits would skip and
+	//     end up on mismatched versions.
+	//   - Resuming a partial release. If a prior run failed
+	//     mid-pipeline (e.g. a GPG signing hiccup created some
+	//     tags but not others), re-running with the same
+	//     `--version vX.Y.Z` value and idempotent tag creation
+	//     (see [EnsureTag]) picks up where the previous run
+	//     stopped without bumping the target version.
+	//
+	// Format: "vX.Y.Z" (with the leading v).
+	//
+	// Mutually exclusive with [Options.Force] (`--major` /
+	// `--minor` / `--patch`). Per-module `--bump MODULE=none`
+	// overrides still skip the named module; per-module
+	// patch/minor/major overrides are ignored (Version wins on
+	// what to tag).
+	Version string
 }
 
 // NewOptions builds an [Options] from the raw cobra flag values.
 // Returns an [ErrUsage]-wrapped error when the inputs are invalid
 // (mutually-exclusive force flags, malformed --bump entry, missing
-// required message).
+// required message, malformed --version).
 func NewOptions(
 	message string, forceMajor, forceMinor, forcePatch bool,
-	bumps []string, dryRun, noTag, noBump, noPush, allowDirty bool,
+	bumps []string, version string,
+	dryRun, noTag, noBump, noPush, allowDirty bool,
 ) (Options, error) {
 	opts := Options{
 		Message:    message,
@@ -100,6 +126,25 @@ func NewOptions(
 			}
 			opts.Overrides[mod] = bl
 		}
+	}
+
+	if version != "" {
+		if opts.Force != BumpNone {
+			return Options{}, fmt.Errorf(
+				"%w: --version is mutually exclusive with --major / --minor / --patch",
+				ErrUsage,
+			)
+		}
+		// VersionFromTag accepts both bare `v1.2.3` and prefixed
+		// tags; we only ever pass the raw flag value here so the
+		// successful path normalises to the X.Y.Z triplet.
+		if _, err := VersionFromTag(version); err != nil {
+			return Options{}, fmt.Errorf(
+				"%w: --version must be vX.Y.Z (got %q): %w",
+				ErrUsage, version, err,
+			)
+		}
+		opts.Version = version
 	}
 
 	if !dryRun && !noTag && message == "" {
