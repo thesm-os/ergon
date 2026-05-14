@@ -107,6 +107,25 @@ func TestLoad(t *testing.T) {
 		}
 	})
 
+	t.Run("bootstrap pinned versions populate the map", func(t *testing.T) {
+		t.Parallel()
+		path := writeYAML(t, `bootstrap:
+  pinned:
+    mvdan.cc/gofumpt: v0.6.0
+    example.com/tool: v1.2.3
+`)
+		got, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load err: %v", err)
+		}
+		if v := got.Bootstrap.Pinned["mvdan.cc/gofumpt"]; v != "v0.6.0" {
+			t.Errorf("Pinned[gofumpt] = %q, want v0.6.0", v)
+		}
+		if v := got.Bootstrap.Pinned["example.com/tool"]; v != "v1.2.3" {
+			t.Errorf("Pinned[example.com/tool] = %q, want v1.2.3", v)
+		}
+	})
+
 	t.Run("bootstrap extras populate the slice in declared order", func(t *testing.T) {
 		t.Parallel()
 		path := writeYAML(t, `bootstrap:

@@ -87,7 +87,7 @@ showing every section populated.
 |---|---|
 | `name` | Project identifier; drives the cache directory `.<name>/`. |
 | `modules` | Override `go.work` discovery with an explicit list. |
-| `bootstrap` | Extra `go install` targets on top of the built-in tool list. |
+| `bootstrap` | Extra `go install` targets on top of the built-in tool list, plus optional per-package version pins for deterministic CI installs. |
 | `license` | go-license config path and walk excludes. |
 | `markdown` | markdownlint-cli2 invocation (globs). |
 | `test` | `go test` knobs: cpu, count, timeout, race-count, bench-count, fuzz-time. |

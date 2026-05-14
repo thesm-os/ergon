@@ -43,8 +43,10 @@ const markdownlintHint = "markdownlint-cli2 not installed; install with: " +
 	"brew install markdownlint-cli2 (or npm install -g markdownlint-cli2)"
 
 // Run installs every entry in [DefaultTools] followed by the
-// per-repo extras from cfg.ExtraTools, then probes for
-// markdownlint-cli2 and tries to install it via npm when missing.
+// per-repo extras from cfg.ExtraTools, applying cfg.Pinned as a
+// per-package version override across the combined list, then
+// probes for markdownlint-cli2 and tries to install it via npm
+// when missing.
 //
 // Behaviour:
 //
@@ -54,15 +56,15 @@ const markdownlintHint = "markdownlint-cli2 not installed; install with: " +
 //     as a warning on stderr, not an error — the rest of the tool
 //     list installed successfully, and the user can install
 //     markdownlint by hand.
+//   - Pinned entries naming an unknown package are silently
+//     ignored. The surface is additive: pinning a tool before
+//     adding it to ExtraTools is legal.
 //
 // stdout receives progress messages (one line per tool); stderr
 // carries the warning case described above plus any subprocess
 // noise.
 func Run(ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer, cfg Config) error {
-	all := make([]ToolSpec, 0, len(DefaultTools)+len(cfg.ExtraTools))
-	all = append(all, DefaultTools...)
-	all = append(all, cfg.ExtraTools...)
-
+	all := resolveTools(cfg)
 	for _, t := range all {
 		if err := installGoTool(ctx, runner, stdout, stderr, t); err != nil {
 			return fmt.Errorf("install %s: %w", t.Pkg, err)
@@ -73,6 +75,24 @@ func Run(ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer, cfg
 		fmt.Fprintln(stderr, "warning:", err)
 	}
 	return nil
+}
+
+// resolveTools merges [DefaultTools] with cfg.ExtraTools and
+// applies cfg.Pinned as a per-package version override. Exposed
+// at package scope so the merge rules — declaration order, the
+// "Pinned beats the per-spec Version" precedence, the silent
+// drop of pins that name no installed package — are independently
+// testable without exercising the subprocess machinery.
+func resolveTools(cfg Config) []ToolSpec {
+	all := make([]ToolSpec, 0, len(DefaultTools)+len(cfg.ExtraTools))
+	all = append(all, DefaultTools...)
+	all = append(all, cfg.ExtraTools...)
+	for i := range all {
+		if v, ok := cfg.Pinned[all[i].Pkg]; ok && v != "" {
+			all[i].Version = v
+		}
+	}
+	return all
 }
 
 // installGoTool runs `go install <Pkg>@<Version>` for the given

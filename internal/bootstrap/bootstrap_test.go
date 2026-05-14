@@ -140,6 +140,162 @@ func TestRun(t *testing.T) {
 			t.Fatalf("err = %v, want mention of first tool %q", err, DefaultTools[0].Pkg)
 		}
 	})
+
+	t.Run("pinned versions override DefaultTools", func(t *testing.T) {
+		t.Parallel()
+		runner := newFakeRunner(simulatePresent("markdownlint-cli2"))
+
+		cfg := Config{Pinned: map[string]string{
+			DefaultTools[0].Pkg: "v1.2.3",
+			DefaultTools[1].Pkg: "v9.9.9",
+		}}
+		if err := Run(t.Context(), runner, io.Discard, io.Discard, cfg); err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		if got := runner.commands[0]; got != "go install "+DefaultTools[0].Pkg+"@v1.2.3" {
+			t.Errorf("commands[0] = %q, want pinned v1.2.3", got)
+		}
+		if got := runner.commands[1]; got != "go install "+DefaultTools[1].Pkg+"@v9.9.9" {
+			t.Errorf("commands[1] = %q, want pinned v9.9.9", got)
+		}
+		// Unpinned defaults stay at @latest.
+		if got := runner.commands[2]; got != "go install "+DefaultTools[2].Pkg+"@latest" {
+			t.Errorf("commands[2] = %q, want @latest", got)
+		}
+	})
+
+	t.Run("pinned versions override ExtraTools", func(t *testing.T) {
+		t.Parallel()
+		runner := newFakeRunner(simulatePresent("markdownlint-cli2"))
+
+		cfg := Config{
+			ExtraTools: []ToolSpec{{Pkg: "example.com/tool", Version: "v0.0.1"}},
+			Pinned:     map[string]string{"example.com/tool": "v2.0.0"},
+		}
+		if err := Run(t.Context(), runner, io.Discard, io.Discard, cfg); err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		last := runner.commands[len(runner.commands)-1]
+		if last != "go install example.com/tool@v2.0.0" {
+			t.Errorf("last cmd = %q, want example.com/tool@v2.0.0 (Pinned beats spec.Version)", last)
+		}
+	})
+
+	t.Run("pinned entry for unknown package is silently ignored", func(t *testing.T) {
+		t.Parallel()
+		runner := newFakeRunner(simulatePresent("markdownlint-cli2"))
+
+		cfg := Config{Pinned: map[string]string{"example.com/not-installed": "v1.0.0"}}
+		if err := Run(t.Context(), runner, io.Discard, io.Discard, cfg); err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		for _, c := range runner.commands {
+			if strings.Contains(c, "example.com/not-installed") {
+				t.Fatalf("unexpected install for unknown pinned package: %q", c)
+			}
+		}
+	})
+
+	t.Run("empty pinned value falls back to the spec version", func(t *testing.T) {
+		t.Parallel()
+		runner := newFakeRunner(simulatePresent("markdownlint-cli2"))
+
+		cfg := Config{Pinned: map[string]string{DefaultTools[0].Pkg: ""}}
+		if err := Run(t.Context(), runner, io.Discard, io.Discard, cfg); err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		if got := runner.commands[0]; got != "go install "+DefaultTools[0].Pkg+"@latest" {
+			t.Errorf("commands[0] = %q, want @latest (empty pin ignored)", got)
+		}
+	})
+}
+
+// TestResolveTools pins the pure merge function used by [Run]:
+// declaration order is preserved across DefaultTools then
+// ExtraTools, Pinned overrides win over any per-spec Version, and
+// pinning an unknown package is a silent no-op.
+func TestResolveTools(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		cfg  Config
+		// checkFn receives the resolved tool list and returns an
+		// error message when the contract under test is violated.
+		check func([]ToolSpec) string
+	}{
+		{
+			name: "empty config yields DefaultTools at latest",
+			cfg:  Config{},
+			check: func(got []ToolSpec) string {
+				if len(got) != len(DefaultTools) {
+					return "length mismatch"
+				}
+				for i, t := range got {
+					if t.Pkg != DefaultTools[i].Pkg || t.Version != "latest" {
+						return "default[i] mismatch"
+					}
+				}
+				return ""
+			},
+		},
+		{
+			name: "ExtraTools append after DefaultTools",
+			cfg: Config{ExtraTools: []ToolSpec{
+				{Pkg: "example.com/x", Version: "v0.0.1"},
+			}},
+			check: func(got []ToolSpec) string {
+				if len(got) != len(DefaultTools)+1 {
+					return "length mismatch"
+				}
+				if got[len(got)-1].Pkg != "example.com/x" {
+					return "extra not at tail"
+				}
+				return ""
+			},
+		},
+		{
+			name: "Pinned overrides DefaultTools",
+			cfg:  Config{Pinned: map[string]string{DefaultTools[0].Pkg: "v1.0.0"}},
+			check: func(got []ToolSpec) string {
+				if got[0].Version != "v1.0.0" {
+					return "default not overridden"
+				}
+				return ""
+			},
+		},
+		{
+			name: "Pinned overrides ExtraTools spec.Version",
+			cfg: Config{
+				ExtraTools: []ToolSpec{{Pkg: "example.com/x", Version: "v0.0.1"}},
+				Pinned:     map[string]string{"example.com/x": "v9.9.9"},
+			},
+			check: func(got []ToolSpec) string {
+				if got[len(got)-1].Version != "v9.9.9" {
+					return "extra not overridden"
+				}
+				return ""
+			},
+		},
+		{
+			name: "Pinned for unknown package is a no-op",
+			cfg:  Config{Pinned: map[string]string{"example.com/nope": "v1.0.0"}},
+			check: func(got []ToolSpec) string {
+				if len(got) != len(DefaultTools) {
+					return "length changed"
+				}
+				return ""
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if msg := tc.check(resolveTools(tc.cfg)); msg != "" {
+				t.Fatalf("%s: %s", tc.name, msg)
+			}
+		})
+	}
 }
 
 // fakeRunner satisfies [xexec.Runner] for tests. It records every
