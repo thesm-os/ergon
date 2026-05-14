@@ -1,0 +1,40 @@
+// Package version exposes the build metadata ldflags inject at
+// link time. Callers (typically a cobra root command) read [Full]
+// to populate `<<.Name>> --version`; the release pipeline
+// (goreleaser) sets the three build-time variables via
+// `-X <<.ModulePath>>/internal/version.buildVersion=<value>`
+// (and similarly for buildCommit / buildDate).
+package version
+
+// buildVersion is the semver tag goreleaser stamps at link time.
+// Empty for unstamped local builds; [Full] then returns "dev".
+var buildVersion = ""
+
+// buildCommit is the git SHA goreleaser stamps at link time.
+// Empty for unstamped local builds.
+var buildCommit = ""
+
+// buildDate is the commit date goreleaser stamps at link time.
+// Empty for unstamped local builds.
+var buildDate = ""
+
+// Full returns the human-facing version string for `--version`.
+// Output shape varies with how many fields the linker populated:
+//
+//   - all empty                   → "dev"
+//   - buildVersion only           → "vX.Y.Z"
+//   - buildVersion + buildCommit  → "vX.Y.Z (sha)"
+//   - all three                   → "vX.Y.Z (sha, built date)"
+func Full() string {
+	if buildVersion == "" {
+		return "dev"
+	}
+	if buildCommit == "" {
+		return buildVersion
+	}
+	suffix := buildCommit
+	if buildDate != "" {
+		suffix += ", built " + buildDate
+	}
+	return buildVersion + " (" + suffix + ")"
+}
