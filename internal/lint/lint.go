@@ -43,31 +43,29 @@ type Inputs struct {
 	Modules []modules.Module
 }
 
-// All runs the four lint stages in order: [Vet], [Go],
-// markdown.Lint, license.Verify. When opts.Fast is false every
-// stage runs even if an earlier one failed; when true the first
-// failure aborts the run. The final aggregated error wraps every
-// stage that failed.
+// All runs the lint stages in order: [Vet], [Go], markdown.Lint,
+// license.Verify — minus any stages excluded by filter. When
+// opts.Fast is false every (filtered-in) stage runs even if an
+// earlier one failed; when true the first failure aborts the run.
+// The final aggregated error wraps every stage that failed.
+//
+// filter selects the stages that participate (allow/deny lists
+// from `.ergon.yaml`'s `lint` section composed with the
+// `--only`/`--skip` CLI flags). An empty filter — the zero value —
+// runs every built-in stage, matching the historical behaviour.
+// Unknown stage names in the filter surface
+// [stage.ErrUnknownStage]; the cobra layer wraps that into a
+// usage error.
 func All(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
 	in Inputs, markdownCfg markdown.Config, licenseCfg license.Config,
+	filter stage.Filter,
 	opts stage.Options,
 ) error {
-	s := style.Detect(stdout)
-	var failures []error
-	record := func(name string, err error) {
-		if err == nil {
-			return
-		}
-		failures = append(failures, fmt.Errorf("%s: %w", name, err))
-	}
-	for _, st := range []struct {
-		name string
-		run  func() error
-	}{
-		{"vet", func() error { return Vet(ctx, runner, stdout, stderr, in, opts) }},
-		{"go", func() error { return Go(ctx, runner, stdout, stderr, in, opts) }},
-		{"markdown", func() error {
+	stages := []stage.Named{
+		{Name: "vet", Run: func() error { return Vet(ctx, runner, stdout, stderr, in, opts) }},
+		{Name: "go", Run: func() error { return Go(ctx, runner, stdout, stderr, in, opts) }},
+		{Name: "md", Run: func() error {
 			return stage.Single(ctx, stdout, opts,
 				"markdownlint", "Markdown style and link checks",
 				"every Markdown file passed", "",
@@ -75,7 +73,7 @@ func All(
 					return markdown.Lint(ctx, runner, sOut, sErr, in.Root, markdownCfg)
 				})
 		}},
-		{"license", func() error {
+		{Name: "license", Run: func() error {
 			return stage.Single(ctx, stdout, opts,
 				"go-license", "SPDX license-header verification",
 				"every source file carries the expected SPDX header", "",
@@ -83,11 +81,20 @@ func All(
 					return license.Verify(ctx, runner, sOut, sErr, in.Root, licenseCfg)
 				})
 		}},
-	} {
-		err := st.run()
-		record(st.name, err)
-		if opts.Fast && err != nil {
-			break
+	}
+	selected, err := filter.Apply(stages)
+	if err != nil {
+		return err
+	}
+
+	s := style.Detect(stdout)
+	var failures []error
+	for _, st := range selected {
+		if runErr := st.Run(); runErr != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", st.Name, runErr))
+			if opts.Fast {
+				break
+			}
 		}
 	}
 	if len(failures) == 0 {

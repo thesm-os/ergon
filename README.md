@@ -49,6 +49,13 @@ ergon release -m "..." # bump versions and tag
 | `--verbose` / `-v` | off | Stream the underlying tool's output live. Default buffers stdout+stderr per call and reveals the capture indented under the failing verdict on error. |
 | `--config` | discovered | Path to `.ergon.yaml`. |
 
+Stage filters apply to the umbrella commands `ergon lint` and `ergon
+check`. Both accept `--only <names>` and `--skip <names>` (comma-
+separated) on top of `lint.enabled` / `lint.disabled` and
+`checks.enabled` / `checks.disabled` in `.ergon.yaml`. CLI `--only`
+wins absolutely; `--skip` unions with the config denylist. Unknown
+stage names surface as a usage error before any work runs.
+
 ### Command tree
 
 | Group | Members |
@@ -89,9 +96,11 @@ showing every section populated.
 | `modules` | Override `go.work` discovery with an explicit list. |
 | `bootstrap` | Extra `go install` targets on top of the built-in tool list, plus optional per-package version pins for deterministic CI installs. |
 | `license` | go-license config path and walk excludes. |
+| `lint` | Stage allow/denylist for `ergon lint` (`enabled` / `disabled`). |
 | `markdown` | markdownlint-cli2 invocation (globs). |
 | `test` | `go test` knobs: cpu, count, timeout, race-count, bench-count, fuzz-time. |
 | `bench` | Baseline path and per-metric regression policy. |
+| `checks.enabled` / `checks.disabled` | Stage allow/denylist for the `ergon check` umbrella. |
 | `checks.excludes` | Shared path-exclusion list (coverage + mutation). |
 | `checks.skips` | Shared structural-skip list (coverage + mutation). |
 | `checks.coverage` | Per-layer line thresholds and the failing-function cap. |

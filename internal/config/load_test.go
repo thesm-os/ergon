@@ -171,6 +171,48 @@ func TestLoad(t *testing.T) {
 		}
 	})
 
+	t.Run("lint.enabled and lint.disabled populate the filter fields", func(t *testing.T) {
+		t.Parallel()
+		path := writeYAML(t, `lint:
+  enabled: [vet, go]
+  disabled: [md]
+`)
+		got, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load err: %v", err)
+		}
+		if len(got.Lint.Enabled) != 2 || got.Lint.Enabled[0] != "vet" || got.Lint.Enabled[1] != "go" {
+			t.Errorf("Lint.Enabled = %+v, want [vet go]", got.Lint.Enabled)
+		}
+		if len(got.Lint.Disabled) != 1 || got.Lint.Disabled[0] != "md" {
+			t.Errorf("Lint.Disabled = %+v, want [md]", got.Lint.Disabled)
+		}
+	})
+
+	t.Run("checks.enabled and checks.disabled populate the filter fields", func(t *testing.T) {
+		t.Parallel()
+		path := writeYAML(t, `checks:
+  enabled: [lint, test, coverage]
+  disabled: [vuln]
+`)
+		got, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load err: %v", err)
+		}
+		want := []string{"lint", "test", "coverage"}
+		if len(got.Checks.Enabled) != len(want) {
+			t.Fatalf("Checks.Enabled = %+v, want %+v", got.Checks.Enabled, want)
+		}
+		for i, w := range want {
+			if got.Checks.Enabled[i] != w {
+				t.Errorf("Checks.Enabled[%d] = %q, want %q", i, got.Checks.Enabled[i], w)
+			}
+		}
+		if len(got.Checks.Disabled) != 1 || got.Checks.Disabled[0] != "vuln" {
+			t.Errorf("Checks.Disabled = %+v, want [vuln]", got.Checks.Disabled)
+		}
+	})
+
 	t.Run("release.modules populates the release scope", func(t *testing.T) {
 		t.Parallel()
 		path := writeYAML(t, `release:

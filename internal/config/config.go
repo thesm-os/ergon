@@ -22,6 +22,7 @@ import (
 	"go.thesmos.sh/ergon/internal/checks/mutation"
 	"go.thesmos.sh/ergon/internal/checks/policy"
 	"go.thesmos.sh/ergon/internal/license"
+	"go.thesmos.sh/ergon/internal/lint"
 	"go.thesmos.sh/ergon/internal/markdown"
 	"go.thesmos.sh/ergon/internal/release"
 	"go.thesmos.sh/ergon/internal/test"
@@ -63,6 +64,12 @@ type Config struct {
 	// field semantics.
 	Markdown markdown.Config `yaml:"markdown"`
 
+	// Lint configures the `ergon lint` umbrella. Today the only
+	// fields are the stage allow/denylist; per-stage tool config
+	// lives under each tool's own section ([Markdown], [License])
+	// and is consumed by [lint.All] directly.
+	Lint lint.Config `yaml:"lint"`
+
 	// Test configures `ergon test` and its subcommands. See
 	// [test.Config] for field semantics.
 	Test test.Config `yaml:"test"`
@@ -89,7 +96,25 @@ type Config struct {
 // file or conformance-suite entry that is exempt from one is
 // invariably exempt from the other. See [policy.Exclude] and
 // [policy.Skip].
+//
+// Enabled and Disabled are the umbrella's stage filter. The
+// `ergon check` umbrella iterates a fixed sequence of named
+// stages (mod, lint, test, coverage, skip-expiry, error-prefix,
+// vuln, and the opt-in mutation/branch gates); these two fields
+// let the project narrow the set. CLI flags `--only` / `--skip`
+// layer on top per the precedence rules documented on
+// [go.thesmos.sh/ergon/internal/stage.Filter].
 type ChecksConfig struct {
+	// Enabled, when non-empty, restricts `ergon check` to these
+	// stages. Empty means "every default stage in scope" plus the
+	// opt-in mutation/branch gates when their thresholds are
+	// declared elsewhere in this section.
+	Enabled []string `yaml:"enabled"`
+
+	// Disabled removes the named stages from the run. Combines
+	// with `--skip` on the CLI as a single denylist.
+	Disabled []string `yaml:"disabled"`
+
 	// Excludes is the shared path-exclusion list both coverage
 	// and mutation consult. A path matching any [policy.Exclude]
 	// is dropped from the coverage threshold check and excluded
@@ -128,6 +153,7 @@ func Defaults() Config {
 		Bootstrap: bootstrap.Defaults(),
 		License:   license.Defaults(),
 		Markdown:  markdown.Defaults(),
+		Lint:      lint.Defaults(),
 		Test:      test.Defaults(),
 		Bench:     bench.Defaults(),
 		Release:   release.Defaults(),

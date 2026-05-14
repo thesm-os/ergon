@@ -33,6 +33,15 @@ func stageOpts() stage.Options {
 	return stage.Options{Fast: fastMode, Verbose: verboseMode}
 }
 
+// checkOnly / checkSkip capture the per-invocation CLI overrides
+// for `ergon check`'s stage filter. They compose with the config
+// values (`checks.enabled` / `checks.disabled` in `.ergon.yaml`)
+// per the precedence rules on [stage.Filter].
+var (
+	checkOnly []string
+	checkSkip []string
+)
+
 // checkCmd is `ergon check`. Bare invocation runs the umbrella
 // pre-merge gate: mod verify → lint → test (which produces the
 // coverage profiles) → coverage thresholds → skip-expiry →
@@ -50,11 +59,16 @@ func stageOpts() stage.Options {
 // declared. Subcommands (`ergon check mutation`, `ergon check
 // branch`) are always available regardless of configuration.
 //
-// Aggregation: by default every stage runs even if an earlier one
-// failed, and a closing summary block lists each stage's verdict
-// so the user sees every problem at once. Pass `--fast` / `-f` to
-// short-circuit at the first stage failure (the dev-loop
-// ergonomic).
+// The stage list can be narrowed further via `.ergon.yaml`'s
+// `checks.enabled` / `checks.disabled` or per-invocation via
+// `--only` / `--skip`. An unknown stage name in either surface
+// surfaces as a usage error so typos are caught at start time.
+//
+// Aggregation: by default every (filtered-in) stage runs even if
+// an earlier one failed, and a closing summary block lists each
+// stage's verdict so the user sees every problem at once. Pass
+// `--fast` / `-f` to short-circuit at the first stage failure
+// (the dev-loop ergonomic).
 var checkCmd = &cobra.Command{
 	Use:   "check",
 	Short: "Run the full pre-merge gate",
@@ -63,8 +77,13 @@ var checkCmd = &cobra.Command{
 		"and branch gates are appended automatically when their " +
 		"respective `.ergon.yaml` thresholds are declared (mutation: " +
 		"`checks.mutation.packages` non-empty; branch: any coverage " +
-		"layer with `require_branch: true`).\n\nBy default every stage " +
-		"runs and the closing summary lists each stage's verdict; pass " +
+		"layer with `require_branch: true`).\n\nThe stage list can " +
+		"be narrowed via `.ergon.yaml`'s `checks.enabled` / " +
+		"`checks.disabled` or per-invocation via `--only` / `--skip`. " +
+		"Stage names are `mod`, `lint`, `test`, `coverage`, " +
+		"`skip-expiry`, `error-prefix`, `vuln`, plus the opt-in " +
+		"`mutation` and `branch`.\n\nBy default every stage runs " +
+		"and the closing summary lists each stage's verdict; pass " +
 		"--fast (-f) to abort at the first failure. Subcommands run " +
 		"individual stages.",
 	Args: cobra.NoArgs,
@@ -109,21 +128,31 @@ var checkCmd = &cobra.Command{
 		}
 
 		opts := stageOpts()
-		stages := []checkStage{
-			{"mod", func() error { return mod.Verify(ctx, runner, stdout, stderr, root, mods, opts) }},
-			{"lint", func() error {
+		// lintFilter forwards the lint-level Enabled/Disabled config
+		// when the umbrella delegates to lint.All; CLI --only/--skip
+		// on `ergon check` apply to the check stages, NOT to the
+		// nested lint stages (those have their own flags on
+		// `ergon lint`).
+		lintFilter := stage.Filter{
+			Enabled:  cfg.Lint.Enabled,
+			Disabled: cfg.Lint.Disabled,
+		}
+		stages := []stage.Named{
+			{Name: "mod", Run: func() error { return mod.Verify(ctx, runner, stdout, stderr, root, mods, opts) }},
+			{Name: "lint", Run: func() error {
 				return lint.All(ctx, runner, stdout, stderr,
-					lint.Inputs{Root: root, Modules: mods}, cfg.Markdown, cfg.License, opts)
+					lint.Inputs{Root: root, Modules: mods}, cfg.Markdown, cfg.License,
+					lintFilter, opts)
 			}},
-			{"test", func() error {
+			{Name: "test", Run: func() error {
 				return test.Run(ctx, runner, stdout, stderr, in, cfg.Test, test.Override{}, opts)
 			}},
-			{"coverage", func() error {
+			{Name: "coverage", Run: func() error {
 				return coverage.Run(ctx, runner, stdout, stderr,
 					root, coverageDir, imports, cfg.Checks.Coverage,
 					cfg.Checks.Excludes, cfg.Checks.Skips, coverage.RunOptions{})
 			}},
-			{"skip-expiry", func() error {
+			{Name: "skip-expiry", Run: func() error {
 				if err := gitFiles(); err != nil {
 					return err
 				}
@@ -134,7 +163,7 @@ var checkCmd = &cobra.Command{
 						return skipexpiry.Run(sOut, sErr, root, goFiles)
 					})
 			}},
-			{"error-prefix", func() error {
+			{Name: "error-prefix", Run: func() error {
 				if err := gitFiles(); err != nil {
 					return err
 				}
@@ -145,7 +174,7 @@ var checkCmd = &cobra.Command{
 						return errorprefix.Run(sOut, sErr, root, goFiles, cfg.Checks.ErrorPrefix)
 					})
 			}},
-			{"vuln", func() error { return vuln.Run(ctx, runner, stdout, stderr, root, mods, opts) }},
+			{Name: "vuln", Run: func() error { return vuln.Run(ctx, runner, stdout, stderr, root, mods, opts) }},
 		}
 
 		// The mutation and branch gates are opt-in per configuration:
@@ -156,9 +185,9 @@ var checkCmd = &cobra.Command{
 		// rebuilds each package under test — so the umbrella stays
 		// fast when neither is configured.
 		if len(cfg.Checks.Mutation.Packages) > 0 {
-			stages = append(stages, checkStage{
-				name: "mutation",
-				run: func() error {
+			stages = append(stages, stage.Named{
+				Name: "mutation",
+				Run: func() error {
 					return mutation.Run(ctx, runner, stdout, stderr,
 						root, cfg.Checks.Mutation,
 						cfg.Checks.Excludes, cfg.Checks.Skips,
@@ -167,9 +196,9 @@ var checkCmd = &cobra.Command{
 			})
 		}
 		if anyRequiresBranch(cfg.Checks.Coverage.Packages) {
-			stages = append(stages, checkStage{
-				name: "branch",
-				run: func() error {
+			stages = append(stages, stage.Named{
+				Name: "branch",
+				Run: func() error {
 					return branch.Run(ctx, runner, stdout, stderr,
 						root, imports, cfg.Checks.Coverage,
 						cfg.Checks.Excludes, cfg.Checks.Skips,
@@ -178,41 +207,47 @@ var checkCmd = &cobra.Command{
 			})
 		}
 
+		// Apply the stage filter — config-side enabled/disabled
+		// composed with the CLI --only/--skip overrides. An unknown
+		// stage name surfaces here as a usage error before any work
+		// runs, so typos are caught fast.
+		selected, err := stage.Filter{
+			Enabled:  cfg.Checks.Enabled,
+			Disabled: cfg.Checks.Disabled,
+			Only:     checkOnly,
+			Skip:     checkSkip,
+		}.Apply(stages)
+		if err != nil {
+			return err
+		}
+
 		s := style.Detect(stdout)
-		results := make([]style.StageResult, 0, len(stages))
+		results := make([]style.StageResult, 0, len(selected))
 		var failures []error
-		for _, st := range stages {
-			if err := st.run(); err != nil {
-				failures = append(failures, fmt.Errorf("%s: %w", st.name, err))
+		for _, st := range selected {
+			if err := st.Run(); err != nil {
+				failures = append(failures, fmt.Errorf("%s: %w", st.Name, err))
 				results = append(results, style.StageResult{
-					Label: st.name, Err: err, Note: "see report above",
+					Label: st.Name, Err: err, Note: "see report above",
 				})
 				if fastMode {
 					break
 				}
 				continue
 			}
-			results = append(results, style.StageResult{Label: st.name})
+			results = append(results, style.StageResult{Label: st.Name})
 		}
 
 		s.Header(stdout, "check summary", "per-stage verdicts for this run")
 		pass := "every stage passed"
 		fail := fmt.Sprintf("%d of %d stage(s) failed (see per-stage reports above)",
-			len(failures), len(stages))
+			len(failures), len(selected))
 		s.Summary(stdout, results, pass, fail)
 		if len(failures) == 0 {
 			return nil
 		}
 		return errors.Join(failures...)
 	},
-}
-
-// checkStage names one umbrella stage and the function that runs
-// it. The function's error is consumed by the aggregator —
-// nothing else.
-type checkStage struct {
-	name string
-	run  func() error
 }
 
 // anyRequiresBranch reports whether at least one declared layer
@@ -229,8 +264,13 @@ func anyRequiresBranch(layers []coverage.Layer) bool {
 	return false
 }
 
-// init attaches checkCmd to the root. Subcommand files attach
-// themselves to checkCmd from their own init() functions.
+// init attaches checkCmd to the root and binds the stage-filter
+// flags. Subcommand files attach themselves to checkCmd from their
+// own init() functions.
 func init() {
+	checkCmd.Flags().StringSliceVar(&checkOnly, "only", nil,
+		"run only these check stages (comma-separated; beats --skip and the config)")
+	checkCmd.Flags().StringSliceVar(&checkSkip, "skip", nil,
+		"skip these check stages (comma-separated; unions with checks.disabled in config)")
 	rootCmd.AddCommand(checkCmd)
 }

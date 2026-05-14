@@ -126,6 +126,7 @@ func TestAll(t *testing.T) {
 			in,
 			markdown.Defaults(),
 			license.Defaults(),
+			stage.Filter{},
 			stage.Options{},
 		)
 		if err != nil {
@@ -157,6 +158,7 @@ func TestAll(t *testing.T) {
 			in,
 			markdown.Defaults(),
 			license.Defaults(),
+			stage.Filter{},
 			stage.Options{},
 		)
 		if err == nil {
@@ -189,6 +191,7 @@ func TestAll(t *testing.T) {
 			in,
 			markdown.Defaults(),
 			license.Defaults(),
+			stage.Filter{},
 			stage.Options{Fast: true},
 		)
 		if err == nil {
@@ -201,6 +204,90 @@ func TestAll(t *testing.T) {
 			if postVet[c.name] {
 				t.Fatalf("unexpected post-vet call: %q (fast mode should abort)", c.name)
 			}
+		}
+	})
+
+	t.Run("filter Only restricts the run to the named stages", func(t *testing.T) {
+		t.Parallel()
+		root := buildTree(t, "main.go")
+		runner := &fakeRunner{}
+
+		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
+		err := All(
+			t.Context(),
+			runner,
+			io.Discard,
+			io.Discard,
+			in,
+			markdown.Defaults(),
+			license.Defaults(),
+			stage.Filter{Only: []string{"vet"}},
+			stage.Options{},
+		)
+		if err != nil {
+			t.Fatalf("All err: %v", err)
+		}
+		for _, c := range runner.calls {
+			// `go vet` registers as name="go" with args containing "vet".
+			isVet := c.name == "go" && slices.Contains(c.args, "vet")
+			if !isVet {
+				t.Fatalf("unexpected call %q with --only vet active", c.name)
+			}
+		}
+	})
+
+	t.Run("filter Disabled removes named stages from the run", func(t *testing.T) {
+		t.Parallel()
+		root := buildTree(t, "main.go")
+		runner := &fakeRunner{}
+
+		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
+		err := All(
+			t.Context(),
+			runner,
+			io.Discard,
+			io.Discard,
+			in,
+			markdown.Defaults(),
+			license.Defaults(),
+			stage.Filter{Disabled: []string{"md", "license"}},
+			stage.Options{},
+		)
+		if err != nil {
+			t.Fatalf("All err: %v", err)
+		}
+		for _, c := range runner.calls {
+			if c.name == "markdownlint-cli2" || c.name == "go-license" {
+				t.Fatalf("unexpected disabled-stage call: %q", c.name)
+			}
+		}
+	})
+
+	t.Run("filter with unknown stage surfaces ErrUnknownStage", func(t *testing.T) {
+		t.Parallel()
+		root := buildTree(t, "main.go")
+		runner := &fakeRunner{}
+
+		in := Inputs{Root: root, Modules: []modules.Module{{Dir: "."}}}
+		err := All(
+			t.Context(),
+			runner,
+			io.Discard,
+			io.Discard,
+			in,
+			markdown.Defaults(),
+			license.Defaults(),
+			stage.Filter{Only: []string{"nonexistent"}},
+			stage.Options{},
+		)
+		if err == nil {
+			t.Fatal("All returned nil, want ErrUnknownStage")
+		}
+		if !errors.Is(err, stage.ErrUnknownStage) {
+			t.Fatalf("err = %v, want wrapped ErrUnknownStage", err)
+		}
+		if len(runner.calls) != 0 {
+			t.Fatalf("recorded %d calls, want 0 (filter validation fails before any stage runs)", len(runner.calls))
 		}
 	})
 }
