@@ -33,6 +33,8 @@ var dotfileRenames = map[string]string{
 	"editorconfig":           ".editorconfig",
 	"pre-commit-config.yaml": ".pre-commit-config.yaml",
 	"golangci.yml":           ".golangci.yml",
+	"go-license.yml":         ".go-license.yml",
+	"markdownlint.yml":       ".markdownlint.yml",
 }
 
 // Vars carries the substitution values `text/template` injects
@@ -49,6 +51,19 @@ type Vars struct {
 	// future templates (e.g. a starter `go.mod`) can consume it
 	// without changing the public surface.
 	Module string
+
+	// Copyright is the holder string `.go-license.yml`'s header
+	// template embeds (e.g. "Acme Inc."). Empty falls back to
+	// [Vars.Name] so a freshly-scaffolded repo's license header
+	// at least reads sensibly until the user edits it.
+	Copyright string
+
+	// License is the SPDX identifier the scaffolded
+	// `.go-license.yml` declares (e.g. "MIT", "Apache-2.0").
+	// Defaults to MIT when empty; the value is inserted verbatim
+	// into the rendered header so users keep `.go-license.yml`'s
+	// authority over license-header content.
+	License string
 }
 
 // Run renders every template under [templatesFS] into dest. Each

@@ -14,9 +14,11 @@ import (
 
 // initFlags captures the raw cobra flag values for `ergon init`.
 var initFlags struct {
-	name   string
-	module string
-	force  bool
+	name      string
+	module    string
+	copyright string
+	license   string
+	force     bool
 }
 
 // initCmd is `ergon init`. Writes the starter file set (Makefile,
@@ -39,8 +41,10 @@ var initCmd = &cobra.Command{
 			return err
 		}
 		vars := scaffold.Vars{
-			Name:   initFlags.name,
-			Module: initFlags.module,
+			Name:      initFlags.name,
+			Module:    initFlags.module,
+			Copyright: initFlags.copyright,
+			License:   initFlags.license,
 		}
 		if vars.Name == "" {
 			vars.Name = filepath.Base(cwd)
@@ -57,6 +61,10 @@ func init() {
 		"Project identifier (defaults to the basename of the CWD)")
 	initCmd.Flags().StringVar(&initFlags.module, "module", "",
 		"Go module path (reserved for future templates)")
+	initCmd.Flags().StringVar(&initFlags.copyright, "copyright", "",
+		"Copyright holder used in the scaffolded `.go-license.yml` header (defaults to --name)")
+	initCmd.Flags().StringVar(&initFlags.license, "license", "MIT",
+		"SPDX license identifier baked into `.go-license.yml`'s header (default: MIT)")
 	initCmd.Flags().BoolVar(&initFlags.force, "force", false,
 		"Overwrite existing files (default: skip with a notice)")
 	rootCmd.AddCommand(initCmd)
