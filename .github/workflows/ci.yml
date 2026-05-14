@@ -69,9 +69,9 @@ jobs:
         run: ergon mod verify
       - name: ergon lint vet
         run: ergon lint vet
-      - name: ergon check skip-expiry
-        run: ergon check skip-expiry
-      - name: ergon check error-prefix
-        run: ergon check error-prefix
-      - name: ergon check vuln
-        run: ergon check vuln
+      - name: ergon lint skip-expiry
+        run: ergon lint skip-expiry
+      - name: ergon lint error-prefix
+        run: ergon lint error-prefix
+      - name: ergon lint vuln
+        run: ergon lint vuln
