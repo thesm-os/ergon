@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 )
 
@@ -34,6 +35,16 @@ type Options struct {
 	// Stderr receives the subprocess's standard error. A nil value
 	// discards.
 	Stderr io.Writer
+
+	// Interactive, when true, makes the subprocess inherit the
+	// caller's terminal (os.Stdin / os.Stdout / os.Stderr) so
+	// operations that prompt the user — hardware-key touch
+	// confirmations, GPG passphrases, ssh-agent unlock dialogs —
+	// can complete. Overrides [Options.Stdout] and
+	// [Options.Stderr] for the duration of the call. Used by the
+	// release pipeline's tag-signing and commit-signing paths,
+	// where git delegates to ssh-keygen / gpg which need a TTY.
+	Interactive bool
 }
 
 // Runner shells out to subprocesses and probes PATH. Implementations
@@ -57,11 +68,24 @@ type Command struct{}
 
 // Run shells out to name with args, applying opts via the
 // underlying os/exec.Command.
+//
+// When [Options.Interactive] is true the subprocess inherits the
+// caller's terminal (os.Stdin / os.Stdout / os.Stderr) so
+// prompts from ssh-keygen / gpg / docker login etc. can complete.
+// Interactive overrides any explicit [Options.Stdout] /
+// [Options.Stderr] passed alongside it — the two paths are
+// mutually exclusive in practice.
 func (Command) Run(ctx context.Context, opts Options, name string, args ...string) error {
 	c := exec.CommandContext(ctx, name, args...)
 	c.Dir = opts.Dir
-	c.Stdout = opts.Stdout
-	c.Stderr = opts.Stderr
+	if opts.Interactive {
+		c.Stdin = os.Stdin
+		c.Stdout = os.Stdout
+		c.Stderr = os.Stderr
+	} else {
+		c.Stdout = opts.Stdout
+		c.Stderr = opts.Stderr
+	}
 	return c.Run()
 }
 

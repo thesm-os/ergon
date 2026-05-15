@@ -99,12 +99,40 @@ func parseScopedCommits(raw string) []CommitInfo {
 // commit it points at is the current HEAD; the caller arranges for
 // the bump commit to be HEAD before calling.
 //
+// Runs git with the caller's terminal inherited (see
+// [xexec.Options.Interactive]) so the signing backend (ssh-keygen
+// for SSH-keys, gpg for OpenPGP) can prompt for passphrases or
+// hardware-key touch confirmations. Without this the subprocess
+// gets no TTY, ssh-keygen falls back to `$SSH_ASKPASS`, and the
+// tag fails with "ssh_askpass: exec(...): No such file" on
+// systems where askpass isn't installed.
+//
 // Prefer [EnsureTag] over Tag at call sites that may be retried —
 // EnsureTag is idempotent when the tag already exists at HEAD,
 // which is exactly the state a partial prior run leaves behind.
 func Tag(ctx context.Context, runner xexec.Runner, root, name, message string) error {
-	_, err := runGit(ctx, runner, root, "tag", "-a", "-m", message, name)
-	return err
+	return runGitInteractive(ctx, runner, root, "tag", "-a", "-m", message, name)
+}
+
+// runGitInteractive shells out to git with the caller's terminal
+// inherited so signing backends can prompt directly. Used for
+// operations that may trigger ssh-keygen / gpg under
+// `tag.gpgsign` / `commit.gpgsign` (Tag, commit). The non-
+// interactive [runGit] continues to back read-only operations
+// (LastTag, ScopedCommits, TagCommit, ...) that never need a
+// prompt.
+//
+// Because git's output streams directly to the user, there is no
+// captured stderr to attach to the returned error; the wrapper
+// names the subcommand and propagates the exit error.
+func runGitInteractive(ctx context.Context, runner xexec.Runner, root string, args ...string) error {
+	err := runner.Run(ctx,
+		xexec.Options{Dir: root, Interactive: true},
+		"git", args...)
+	if err != nil {
+		return fmt.Errorf("git %s: %w", args[0], err)
+	}
+	return nil
 }
 
 // TagCommit returns the commit a tag points at and whether the

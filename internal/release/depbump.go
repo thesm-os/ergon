@@ -374,6 +374,12 @@ func bumpOwnRequires(
 // responsible for enumerating exactly what changed — `git add
 // -A` is intentionally not used so the bump commit never picks
 // up unrelated edits a developer might have in the worktree.
+//
+// `git add` runs in the standard buffered mode (no user
+// interaction expected). `git commit` runs with the caller's
+// terminal inherited because `commit.gpgsign=true` makes git
+// invoke ssh-keygen / gpg, which needs a TTY for passphrase or
+// hardware-key touch prompts.
 func commitPaths(ctx context.Context, runner xexec.Runner, root string, paths []string, msg string) error {
 	if len(paths) == 0 {
 		return nil
@@ -385,13 +391,7 @@ func commitPaths(ctx context.Context, runner xexec.Runner, root string, paths []
 		"git", args...); err != nil {
 		return fmt.Errorf("git add: %w: %s", err, strings.TrimSpace(buf.String()))
 	}
-	buf.Reset()
-	if err := runner.Run(ctx,
-		xexec.Options{Dir: root, Stdout: &buf, Stderr: &buf},
-		"git", "commit", "-m", msg); err != nil {
-		return fmt.Errorf("git commit: %w: %s", err, strings.TrimSpace(buf.String()))
-	}
-	return nil
+	return runGitInteractive(ctx, runner, root, "commit", "-m", msg)
 }
 
 // bumpedPaths returns the go.mod + go.sum paths (relative to
