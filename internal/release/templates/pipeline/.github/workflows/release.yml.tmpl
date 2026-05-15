@@ -7,7 +7,8 @@ on:
 permissions:
   contents: write
   packages: write
-  id-token: write  # cosign keyless signing reads OIDC tokens
+  id-token: write       # cosign keyless signing + attestation OIDC
+  attestations: write   # actions/attest-build-provenance writes the SLSA attestation
 
 jobs:
   goreleaser:
@@ -61,4 +62,26 @@ jobs:
           # goreleaser's homebrew_casks block uses it to bump the
           # cask file on every non-prerelease tag.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+<<- end>>
+      # SLSA Build L3 provenance attestation. Stored in GitHub's
+      # attestation API (not attached to the release), so it works
+      # even when the repo has "Immutable releases" enabled — the
+      # release itself isn't modified after creation. Users verify
+      # with `gh attestation verify --owner <owner> <file>` or
+      # `slsa-verifier verify-artifact` against the downloaded
+      # attestation bundle.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          # Attest both the archives AND the raw per-target binaries
+          # under dist/<id>_<goos>_<goarch>[_<variant>]/. Including the
+          # binaries lets users verify the installed file directly
+          # (e.g. /opt/homebrew/Caskroom/<name>/<ver>/<bin>) without
+          # having to re-download the archive.
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+<<- range .Builds>>
+            dist/**/<<.BinaryName>>
+            dist/**/<<.BinaryName>>.exe
 <<- end>>

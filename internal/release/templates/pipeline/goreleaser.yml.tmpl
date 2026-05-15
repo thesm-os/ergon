@@ -10,6 +10,21 @@ project_name: <<.Name>>
 before:
   hooks:
     - go vet ./...
+    # Pre-generate shell completions and ship them in the archive,
+    # rather than letting Homebrew's `generate_from_command` exec the
+    # binary at install time. Cask runs that during staging — before
+    # any `postflight` hook — so the quarantine xattr is still on the
+    # darwin binary when it tries to run, and Apple Silicon SIGKILLs
+    # it. Generating once at build time on Linux sidesteps that race.
+    # Requires the binary to support `completion <shell>` (cobra's
+    # default surface); delete this block if your CLI does not.
+    - mkdir -p completions
+<<- range .Builds>>
+    - sh -c '(cd <<.Dir>> && go run <<.MainPath>> completion bash)       > completions/<<.BinaryName>>.bash'
+    - sh -c '(cd <<.Dir>> && go run <<.MainPath>> completion zsh)        > completions/<<.BinaryName>>.zsh'
+    - sh -c '(cd <<.Dir>> && go run <<.MainPath>> completion fish)       > completions/<<.BinaryName>>.fish'
+    - sh -c '(cd <<.Dir>> && go run <<.MainPath>> completion powershell) > completions/<<.BinaryName>>.ps1'
+<<- end>>
 
 builds:
 <<- range .Builds>>
@@ -52,6 +67,13 @@ archives:
     format_overrides:
       - goos: windows
         formats: ['zip']
+    # Overriding `files` replaces goreleaser's defaults
+    # (LICENSE*, README*), so list them explicitly. The
+    # completions/ tree is produced by the before.hooks above.
+    files:
+      - LICENSE
+      - README*
+      - completions/*
 
 source:
   enabled: true
@@ -116,6 +138,35 @@ homebrew_casks:
 <<- end>>
     homepage: 'https://github.com/<<.HomebrewTapOwner>>/<<.Name>>'
     description: 'TODO: short project description'
+    # Pre-built completions shipped inside the archive (see
+    # before.hooks above). Paths are relative to staged_path; Homebrew
+    # symlinks each into the right shell-completion directory and
+    # renames as needed (zsh wants `_<name>` in fpath, etc.).
+    # `homebrew_casks.completions` only supports bash/zsh/fish; the
+    # .ps1 stays in the archive for Windows users who unpack manually.
+    # For multi-binary casks this wires the FIRST build's completions;
+    # adjust by hand if you want a different binary's surface.
+<<- with index .Builds 0>>
+    completions:
+      bash: completions/<<.BinaryName>>.bash
+      zsh: completions/<<.BinaryName>>.zsh
+      fish: completions/<<.BinaryName>>.fish
+<<- end>>
+    # Without this hook, `brew install --cask` leaves
+    # `com.apple.quarantine` on the binary; Gatekeeper then SIGKILLs
+    # the Mach-O at exec on Apple Silicon. (Cask's
+    # auto-quarantine-removal only fires for `app`/`pkg` artifact
+    # types, not `binary`.) Stripping it in post-install is the
+    # documented workaround until you ship Developer-ID-signed +
+    # notarized binaries.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+<<- range .Builds>>
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/<<.BinaryName>>"]
+<<- end>>
+          end
     # Tap repo lives at github.com/<<.HomebrewTapOwner>>/<<.HomebrewTapName>>.
     # Cross-repo writes need a PAT with contents:write on the tap;
     # the release workflow exposes it as $HOMEBREW_TAP_TOKEN.

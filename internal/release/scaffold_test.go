@@ -42,10 +42,33 @@ func TestScaffold(t *testing.T) {
 		if !strings.Contains(body, "example.com/proj/internal/version.buildVersion") {
 			t.Errorf("goreleaser.yml missing module-path ldflag:\n%s", body)
 		}
+		// Always-on additions: completion pre-generation hooks and
+		// the archive files override that ships them.
+		for _, want := range []string{
+			"completion bash",
+			"> completions/proj.bash",
+			"- completions/*",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("baseline goreleaser.yml missing %q:\n%s", want, body)
+			}
+		}
 		// Conditional blocks stay absent under baseline vars.
 		for _, sentinel := range []string{"upx --best --lzma", "homebrew_casks:", "dockers:"} {
 			if strings.Contains(body, sentinel) {
 				t.Errorf("baseline goreleaser.yml contains %q; want absent", sentinel)
+			}
+		}
+		// Build-provenance attestation is unconditional in the
+		// workflow.
+		wf := readAll(t, dest, ".github/workflows/release.yml")
+		for _, want := range []string{
+			"attestations: write",
+			"actions/attest-build-provenance@v2",
+			"dist/**/proj",
+		} {
+			if !strings.Contains(wf, want) {
+				t.Errorf("baseline release.yml missing %q:\n%s", want, wf)
 			}
 		}
 	})
@@ -90,6 +113,19 @@ func TestScaffold(t *testing.T) {
 		}
 		if !strings.Contains(gor, "owner: myorg") || !strings.Contains(gor, "name: homebrew-tap") {
 			t.Errorf("homebrew owner/repo did not substitute:\n%s", gor)
+		}
+		// Cask must wire pre-built completions for the first binary
+		// and strip Apple's quarantine xattr per binary in post-install.
+		for _, want := range []string{
+			"bash: completions/proj.bash",
+			"zsh: completions/proj.zsh",
+			"fish: completions/proj.fish",
+			"com.apple.quarantine",
+			`"#{staged_path}/proj"`,
+		} {
+			if !strings.Contains(gor, want) {
+				t.Errorf("Homebrew cask missing %q:\n%s", want, gor)
+			}
 		}
 		wf := readAll(t, dest, ".github/workflows/release.yml")
 		if !strings.Contains(wf, "HOMEBREW_TAP_TOKEN") {
@@ -201,6 +237,22 @@ func TestScaffold(t *testing.T) {
 		gor := readAll(t, dest, ".goreleaser.yml")
 		if !strings.Contains(gor, "id: foo") || !strings.Contains(gor, "id: bar") {
 			t.Errorf("multi-build did not produce both entries:\n%s", gor)
+		}
+		// Completion pre-generation iterates per binary.
+		for _, want := range []string{
+			"> completions/foo.bash",
+			"> completions/bar.bash",
+		} {
+			if !strings.Contains(gor, want) {
+				t.Errorf("multi-build completions missing %q:\n%s", want, gor)
+			}
+		}
+		// Attestation subject-path iterates per binary too.
+		wf := readAll(t, dest, ".github/workflows/release.yml")
+		for _, want := range []string{"dist/**/foo", "dist/**/bar"} {
+			if !strings.Contains(wf, want) {
+				t.Errorf("multi-build attestation subject-path missing %q:\n%s", want, wf)
+			}
 		}
 		// One version package at the shared module root.
 		assertFileExists(t, dest, "internal/version/version.go")
