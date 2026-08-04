@@ -28,7 +28,11 @@ import (
 // a subcommand registered against the wrong parent (or dropped in
 // a refactor) is otherwise invisible until a user types it.
 func TestCommandTree(t *testing.T) {
-	t.Parallel()
+	// Not parallel: cobra's Commands() lazily sorts and caches
+	// (c.commandsAreSorted = true), so walking the shared global
+	// rootCmd is a WRITE, not a read. Any two of these running
+	// concurrently race — as does InitDefaultHelpCmd, which grafts
+	// a command onto the tree.
 
 	// Mirrors the "Command tree" table in README.md.
 	want := map[string][]string{
@@ -66,7 +70,11 @@ func TestCommandTree(t *testing.T) {
 // neither RunE nor subcommands prints usage and exits 0, which
 // reads as success to a CI script.
 func TestEveryCommandHasRunnableSurface(t *testing.T) {
-	t.Parallel()
+	// Not parallel: cobra's Commands() lazily sorts and caches
+	// (c.commandsAreSorted = true), so walking the shared global
+	// rootCmd is a WRITE, not a read. Any two of these running
+	// concurrently race — as does InitDefaultHelpCmd, which grafts
+	// a command onto the tree.
 	var walk func(c *cobra.Command)
 	walk = func(c *cobra.Command) {
 		if c.RunE == nil && c.Run == nil && !c.HasSubCommands() {
@@ -83,7 +91,11 @@ func TestEveryCommandHasRunnableSurface(t *testing.T) {
 // `ergon help` renders Short per line; an empty one leaves a blank
 // entry in the listing.
 func TestCommandsDocumented(t *testing.T) {
-	t.Parallel()
+	// Not parallel: cobra's Commands() lazily sorts and caches
+	// (c.commandsAreSorted = true), so walking the shared global
+	// rootCmd is a WRITE, not a read. Any two of these running
+	// concurrently race — as does InitDefaultHelpCmd, which grafts
+	// a command onto the tree.
 	var walk func(c *cobra.Command)
 	walk = func(c *cobra.Command) {
 		if c.Short == "" && c.Name() != "help" {
@@ -470,7 +482,11 @@ var ergonCall = regexp.MustCompile(
 // check"`. Nothing connected the template text to the command tree,
 // so a template could name a command that never existed.
 func TestScaffoldedCommandsResolve(t *testing.T) {
-	t.Parallel()
+	// Not parallel: cobra's Commands() lazily sorts and caches
+	// (c.commandsAreSorted = true), so walking the shared global
+	// rootCmd is a WRITE, not a read. Any two of these running
+	// concurrently race — as does InitDefaultHelpCmd, which grafts
+	// a command onto the tree.
 
 	dest := t.TempDir()
 	if err := scaffold.Run(io.Discard, dest, scaffold.Vars{
@@ -538,7 +554,11 @@ func TestScaffoldedCommandsResolve(t *testing.T) {
 // check above fails on the shape that actually shipped, rather than
 // passing vacuously.
 func TestScaffoldedCommandsResolveCatchesTheRegression(t *testing.T) {
-	t.Parallel()
+	// Not parallel: cobra's Commands() lazily sorts and caches
+	// (c.commandsAreSorted = true), so walking the shared global
+	// rootCmd is a WRITE, not a read. Any two of these running
+	// concurrently race — as does InitDefaultHelpCmd, which grafts
+	// a command onto the tree.
 	if bad, ok := resolveCommandPath([]string{"check", "vuln"}); ok {
 		t.Error("`ergon check vuln` resolved, but vuln is a stage of lint")
 	} else if bad != "vuln" {
