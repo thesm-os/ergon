@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -115,6 +116,16 @@ func TestResolveBuildSpecNoModule(t *testing.T) {
 // surfaced rather than silently producing a partial pipeline.
 func TestScaffoldWriteFailure(t *testing.T) {
 	t.Parallel()
+	// The unwritable destination is produced with chmod, which only
+	// denies writes where POSIX mode bits are enforced. On Windows
+	// os.Chmod toggles the read-only attribute and does not stop
+	// file creation inside a directory, so the write would succeed
+	// and the assertion below would be testing nothing.
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod does not deny directory writes on Windows")
+	}
+	// Root bypasses mode bits entirely. Geteuid reports -1 on
+	// Windows, so this check has to follow the GOOS guard.
 	if os.Geteuid() == 0 {
 		t.Skip("running as root; mode bits do not deny writes")
 	}
