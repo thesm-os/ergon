@@ -43,144 +43,38 @@ ergon release -m "..." # bump versions and tag
 
 ### Global flags
 
-| Flag | Default | Meaning |
-|---|---|---|
-| `--fast` / `-f` | off | Stop at the first per-module or per-stage failure. Default runs every target and aggregates failures into a closing summary. |
-| `--verbose` / `-v` | off | Stream the underlying tool's output live. Default buffers stdout+stderr per call and reveals the capture indented under the failing verdict on error. |
-| `--config` | discovered | Path to `.ergon.yaml`. |
-
-Stage filters apply to the umbrella commands `ergon lint` and `ergon
-check`. Both accept `--only <names>` and `--skip <names>` (comma-
-separated) on top of `lint.enabled` / `lint.disabled` and
-`checks.enabled` / `checks.disabled` in `.ergon.yaml`. CLI `--only`
-wins absolutely; `--skip` unions with the config denylist. Unknown
-stage names surface as a usage error before any work runs.
+See [CLI reference](docs/reference/cli.md#global-flags).
 
 ### Command tree
 
-| Group | Members |
-|---|---|
-| Top-level | `bootstrap`, `init`, `clean`, `fmt`, `license`, `generate`, `build`, `release` |
-| `lint` | `vet`, `go`, `md`, `license`, `skip-expiry`, `error-prefix`, `vuln` |
-| `mod` | `list`, `install`, `tidy`, `verify` |
-| `test` | `race`, `bench`, `fuzz`, `coverage` |
-| `bench` | `baseline`, `regression` |
-| `check` | `coverage`, `mutation`, `branch`, `commit-msg` |
-
-The `lint` umbrella holds every static-analysis stage —
-anything that examines source without running tests. The
-`check` umbrella holds the test-derived gates (and orchestrates
-`mod verify`, `lint`, `test`, `coverage` for the full pre-merge
-pipeline). Mutation and branch are excluded from the default
-`check` because each adds minutes per layer; both are appended
-automatically when their `.ergon.yaml` thresholds are declared,
-or invoked explicitly via `ergon check mutation` /
-`ergon check branch`.
+See [CLI reference](docs/reference/cli.md#command-tree), and
+[why lint and check are separate umbrellas](docs/explanation/lint-vs-check.md).
 
 ## Scaffolding
 
-```bash
-ergon init            # write Makefile, .ergon.yaml, .gitignore, README, .github/workflows/ci.yml
-ergon init --force    # overwrite existing files
-```
-
-Files that already exist are skipped with a notice, so
-re-running fills in the gaps without overwriting local edits.
+See [scaffold a project](docs/how-to/scaffold-a-project.md).
 
 ### Release scaffolding
 
-```bash
-ergon release init                                  # baseline goreleaser + workflow
-ergon release init --upx                            # + binary packing
-ergon release init --homebrew owner/repo            # + Homebrew cask publishing
-ergon release init --docker ghcr.io/owner           # + Docker image publishing (per-binary)
-ergon release init --main ./cli                     # single binary at ./cli (auto-detected submodule)
-ergon release init --main ./cmd/foo --main ./cmd/bar # multi-binary, two builds entries
-```
-
-`ergon release init` writes a starter `.goreleaser.yml`, a
-matching `.github/workflows/release.yml`, and a per-module
-`internal/version/{version.go,version_test.go}` (the package the
-release pipeline's ldflags target). All conditional sections
-activate via flags; existing files are skipped unless `--force`.
-
-`--main` (repeatable) names each build target. The scaffold
-walks each path upward to the nearest enclosing `go.mod`, so
-root-module, submodule (`./cli/go.mod`), and nested-submodule
-(`./cmd/go.mod`) layouts all generate the right `dir:` / `main:`
-/ ldflag tuple. Defaults to `./cmd/<name>` when no `--main` is
-passed.
-
-`--docker` takes a registry prefix; each build's image template
-renders as `<prefix>/<binary>`, so a multi-binary project
-produces one independent multi-arch image per binary. ghcr.io
-prefixes auto-wire the workflow's docker-login step to use
-`GITHUB_TOKEN`; other registries reference `DOCKER_USERNAME` /
-`DOCKER_TOKEN` repository secrets you supply yourself.
+See [set up a release pipeline](docs/how-to/set-up-a-release-pipeline.md).
 
 ## Configuration
 
-`.ergon.yaml` at the repository root configures every subsystem.
-Every field is optional; values not set there fall back to each
-subsystem's `Defaults()`. `ergon init` writes a worked example
-showing every section populated.
-
-| Key | Configures |
-|---|---|
-| `name` | Project identifier; drives the cache directory `.<name>/`. |
-| `modules` | Override `go.work` discovery with an explicit list. |
-| `bootstrap` | Extra `go install` targets on top of the built-in tool list, plus optional per-package version pins for deterministic CI installs. |
-| `license` | go-license config path and walk excludes. |
-| `lint` | Stage allow/denylist for `ergon lint` (`enabled` / `disabled`) plus `error_prefix.target_dirs`. |
-| `markdown` | markdownlint-cli2 invocation (globs). |
-| `test` | `go test` knobs: cpu, count, timeout, race-count, bench-count, fuzz-time. |
-| `bench` | Baseline path and per-metric regression policy. |
-| `checks.enabled` / `checks.disabled` | Stage allow/denylist for the `ergon check` umbrella. |
-| `checks.excludes` | Shared path-exclusion list (coverage + mutation). |
-| `checks.skips` | Shared structural-skip list (coverage + mutation). |
-| `checks.coverage` | Per-layer line thresholds and the failing-function cap. |
-| `checks.mutation` | Per-layer score / coverage thresholds and `gremlins` invocation policy. |
-| `checks.commit_msg` | Conventional-commit types and the max subject length. |
-
-The repository's own [`.ergon.yaml`](.ergon.yaml) doubles as a
-reference.
+See [configuration reference](docs/reference/configuration.md).
 
 ## Bench
 
-```bash
-ergon bench baseline      # pin the current benchmark numbers
-ergon bench regression    # fail when a new run regresses against the pinned baseline
-```
-
-`bench regression` parses `benchstat -format csv` and applies a
-different policy per metric:
-
-| Metric | Default | Verdict |
-|---|---|---|
-| `sec/op` | ≥ 5% | FAIL (statistically significant delta only) |
-| `allocs/op` | > 0% | FAIL (statistically significant positive delta) |
-| `B/op` | ≥ 10% | WARN (advisory; never fails — too noisy under struct-padding changes) |
+See [CLI reference](docs/reference/cli.md#bench), and
+[why the benchmark policy differs per metric](docs/explanation/benchmark-regression-policy.md).
 
 ## Development
 
-```bash
-make bootstrap    # install tool dependencies
-make check        # run the umbrella gate
-make test         # go test ./...
-make test-e2e     # run tests behind `//go:build e2e` (real git / network)
-make build        # go build ./cmd/ergon
-```
+See [CONTRIBUTING](CONTRIBUTING.md).
 
-The `Makefile` shells out to ergon (`ERGON ?= go run ./cmd/ergon`)
-so the project's own gates run through the binary it ships.
+## Documentation
 
-End-to-end tests live behind the `e2e` build tag so they stay
-out of the default `go test ./...` (and `ergon check`) hot path.
-The release pipeline carries one such test that spins up a
-synthetic two-module git repo, runs `ApplyPipeline` against
-real `git`, and asserts the bump-rewrite-commit-tag flow lands
-correctly — the path with the highest silent-corruption risk
-under fakeRunner-only coverage.
+[`docs/`](docs/README.md) — reference, how-to guides, explanation,
+and architecture decision records.
 
 ## License
 
