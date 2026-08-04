@@ -169,3 +169,40 @@ func TestGlobRegex(t *testing.T) {
 		}
 	}
 }
+
+// TestMatchesExcludeBadGlob covers the compile-failure branch: a
+// glob that does not produce a valid regex is skipped rather than
+// aborting the walk, so one malformed `.ergon.yaml` entry cannot
+// take the whole gate down.
+func TestMatchesExcludeBadGlob(t *testing.T) {
+	t.Parallel()
+
+	bad := []Exclude{{Path: "internal/[", Reason: "unterminated character class"}}
+	if MatchesExclude("internal/a.go", bad) {
+		t.Error("MatchesExclude = true, want the uncompilable glob skipped")
+	}
+
+	// A valid entry alongside the bad one must still match.
+	mixed := []Exclude{
+		{Path: "internal/[", Reason: "bad"},
+		{Path: "internal/...", Reason: "good"},
+	}
+	if !MatchesExclude("internal/a.go", mixed) {
+		t.Error("MatchesExclude = false, want the valid entry to still match")
+	}
+}
+
+// TestMatchesSkipEmptyGlob covers the empty-pattern guard: an empty
+// glob matches nothing, so a half-filled skip entry cannot silently
+// exempt the entire tree.
+func TestMatchesSkipEmptyGlob(t *testing.T) {
+	t.Parallel()
+
+	if MatchesSkip("Assert", "internal/a.go", []Skip{{Label: "x", FuncGlob: "", FileGlob: ""}}) {
+		t.Error("MatchesSkip = true for empty globs, want no match")
+	}
+	emptyFileGlob := []Skip{{Label: "x", FuncGlob: "Assert", FileGlob: ""}}
+	if MatchesSkip("Assert", "internal/a.go", emptyFileGlob) {
+		t.Error("MatchesSkip = true with an empty file glob, want no match")
+	}
+}

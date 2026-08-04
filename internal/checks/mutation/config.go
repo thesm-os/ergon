@@ -74,9 +74,19 @@ type GremlinsConfig struct {
 	// has headroom and back-to-back layer runs do not contend.
 	Workers int `yaml:"workers"`
 
-	// TestCPU is the `go test -cpu` setting each worker uses. Two
-	// keeps a 16-core machine from spawning 256-way parallelism
-	// per layer.
+	// TestCPU is INERT and no longer reaches gremlins.
+	//
+	// It was the `go test -cpu` setting each worker used. gremlins
+	// renders the flag as a single argv element containing a space
+	// (`-cpu 2`), which `go test` rejects; gremlins reads the
+	// resulting non-zero exit as a killed mutant, so passing it
+	// forces 100% test efficacy for every covered mutant no matter
+	// how weak the suite is. ergon therefore omits the flag — see
+	// the comment on runGremlins for the verification.
+	//
+	// The field is kept because the config decoder is strict:
+	// deleting the key would turn every `.ergon.yaml` that sets
+	// `test_cpu` into a hard parse error. Setting it has no effect.
 	TestCPU int `yaml:"test_cpu"`
 
 	// TimeoutCoefficient is gremlins' `--timeout-coefficient`. The

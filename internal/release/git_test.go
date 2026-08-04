@@ -406,3 +406,44 @@ func TestShortSHA(t *testing.T) {
 		})
 	}
 }
+
+// TestEnsureTagFailurePaths covers the two git failures inside the
+// idempotency probe. Both must abort rather than fall through to
+// creating a tag, because a failed probe means we cannot tell
+// whether an existing tag would be silently moved.
+func TestEnsureTagFailurePaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the rev-list dereference failing aborts", func(t *testing.T) {
+		t.Parallel()
+		// `git tag -l` reports the tag exists, then rev-list fails.
+		runner := &gitFakeRunner{
+			perCallOutputs: []string{"v1.0.0\n"},
+			decide: func(_ string, args []string) error {
+				if len(args) > 0 && args[0] == "rev-list" {
+					return errors.New("exit status 128")
+				}
+				return nil
+			},
+		}
+		if err := EnsureTag(t.Context(), runner, t.TempDir(), "v1.0.0", "body"); err == nil {
+			t.Fatal("EnsureTag returned nil, want the rev-list failure")
+		}
+	})
+
+	t.Run("HEAD resolution failing aborts", func(t *testing.T) {
+		t.Parallel()
+		runner := &gitFakeRunner{
+			perCallOutputs: []string{"v1.0.0\n", "abc123\n"},
+			decide: func(_ string, args []string) error {
+				if len(args) > 0 && args[0] == "rev-parse" {
+					return errors.New("exit status 128")
+				}
+				return nil
+			},
+		}
+		if err := EnsureTag(t.Context(), runner, t.TempDir(), "v1.0.0", "body"); err == nil {
+			t.Fatal("EnsureTag returned nil, want the rev-parse failure")
+		}
+	})
+}

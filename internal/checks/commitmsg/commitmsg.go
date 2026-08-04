@@ -141,9 +141,12 @@ func validateBody(lines []string, cfg Config) error {
 	if strings.TrimSpace(line2) != "" {
 		return fmt.Errorf("%w: got %q", ErrBodyLeadingBlankMissing, line2)
 	}
-	if cfg.BodyMaxLineLength == 0 {
-		return nil
-	}
+	// No zero-guard on cfg.BodyMaxLineLength: [Validate] runs
+	// withDefaults before calling here, which replaces a zero with
+	// [Defaults]'s 100, so the field is never zero at this point.
+	// The check that used to sit here predated withDefaults and was
+	// unreachable — there is no way to disable the body-line limit
+	// through config today.
 	for i, line := range lines[1:] {
 		line = strings.TrimRight(line, "\r")
 		if len(line) > cfg.BodyMaxLineLength {

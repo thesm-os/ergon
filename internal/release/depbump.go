@@ -42,8 +42,9 @@ import (
 // Options that shape the pipeline:
 //
 //   - NoTag: print the plan, do nothing else.
-//   - NoBump (implied by NoPush): skip steps 1–3; tag every layer
-//     at the initial HEAD without rewriting go.mods.
+//   - NoBump: skip steps 1–3; tag every layer at the initial HEAD
+//     without rewriting go.mods. Independent of NoPush — setting
+//     one does not set the other.
 //   - NoPush: also skip the per-layer pushes; the release stays
 //     local (useful for offline rehearsals).
 //   - AllowDirty: bypass the working-tree cleanliness check.
@@ -109,11 +110,22 @@ func ApplyPipeline(
 
 		// Step 1: rewrite this layer's own go.mods to require the
 		// prior-layer versions. Step 2: tidy. Step 3: commit.
-		bumped, err := bumpOwnRequires(root, ready, versions, released)
-		if err != nil {
-			return err
+		//
+		// The rewrite is gated on NoBump, not just the tidy/commit
+		// that follow: bumpOwnRequires writes go.mod files to disk,
+		// so calling it under --no-bump left the user with modified
+		// go.mods that were never committed, while the tags pointed
+		// at commits without them. The flag means "do not touch my
+		// go.mods", so it has to skip the write too.
+		var bumped []string
+		if !opts.NoBump {
+			var err error
+			bumped, err = bumpOwnRequires(root, ready, versions, released)
+			if err != nil {
+				return err
+			}
 		}
-		if len(bumped) > 0 && !opts.NoBump {
+		if len(bumped) > 0 {
 			// Tidy is gated on push-mode because it needs the
 			// prior-layer tags resolvable through the proxy or
 			// direct git fetch. With --no-push the tags only

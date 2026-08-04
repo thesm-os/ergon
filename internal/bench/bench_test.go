@@ -311,3 +311,53 @@ func testCfg(benchCount int, timeout time.Duration) test.Config {
 		Timeout:    timeout,
 	}
 }
+
+// TestWithDefaultsFields pins the per-field zero-value fallbacks.
+// Each threshold falls back independently, so a config that sets
+// only one keeps the defaults for the rest.
+func TestWithDefaultsFields(t *testing.T) {
+	t.Parallel()
+
+	d := Defaults()
+
+	t.Run("an empty config inherits every default", func(t *testing.T) {
+		t.Parallel()
+		got := withDefaults(Config{})
+		if got.BaselinePath != d.BaselinePath {
+			t.Errorf("BaselinePath = %q, want %q", got.BaselinePath, d.BaselinePath)
+		}
+		if got.Thresholds != d.Thresholds {
+			t.Errorf("Thresholds = %+v, want %+v", got.Thresholds, d.Thresholds)
+		}
+	})
+
+	t.Run("explicit values are preserved", func(t *testing.T) {
+		t.Parallel()
+		in := Config{
+			BaselinePath: "custom/base.txt",
+			Thresholds: Thresholds{
+				TimePercent:   1,
+				BytesPercent:  2,
+				AllocsPercent: 3,
+			},
+		}
+		got := withDefaults(in)
+		if got != in {
+			t.Errorf("withDefaults(%+v) = %+v, want it unchanged", in, got)
+		}
+	})
+
+	t.Run("each field falls back independently", func(t *testing.T) {
+		t.Parallel()
+		got := withDefaults(Config{Thresholds: Thresholds{TimePercent: 42}})
+		if got.Thresholds.TimePercent != 42 {
+			t.Errorf("TimePercent = %v, want the explicit 42 kept", got.Thresholds.TimePercent)
+		}
+		if got.Thresholds.BytesPercent != d.Thresholds.BytesPercent {
+			t.Errorf("BytesPercent = %v, want the default", got.Thresholds.BytesPercent)
+		}
+		if got.BaselinePath != d.BaselinePath {
+			t.Errorf("BaselinePath = %q, want the default", got.BaselinePath)
+		}
+	})
+}

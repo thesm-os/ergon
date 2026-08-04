@@ -4,8 +4,10 @@
 package mutation
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"go.thesmos.sh/ergon/internal/checks/policy"
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/style"
 )
@@ -155,7 +158,8 @@ func TestRun(t *testing.T) {
 
 	t.Run("positional subpath restricts gremlins path", func(t *testing.T) {
 		t.Parallel()
-		root := buildTree(t, "core")
+		root := buildTree(t, "core/kernel/fold")
+		writeGoMod(t, root, "core")
 		runner := &fakeRunner{output: gremlinsOutput(95, 95)}
 
 		cfg := Config{Packages: []Layer{{Path: "core/...", Score: 90, Coverage: 90}}}
@@ -167,8 +171,13 @@ func TestRun(t *testing.T) {
 		if len(runner.calls) != 1 {
 			t.Fatalf("calls = %+v, want one", runner.calls)
 		}
-		if !strings.Contains(runner.calls[0], "./kernel/fold/") {
-			t.Fatalf("call = %q, want subpath './kernel/fold/'", runner.calls[0])
+		// The layer owns the go.mod, so gremlins runs from there and
+		// the subpath is expressed relative to it.
+		if want := filepath.ToSlash(filepath.Join(root, "core")); runner.dirs[0] != want {
+			t.Fatalf("dir = %q, want %q", runner.dirs[0], want)
+		}
+		if runner.targets[0] != "./kernel/fold/" {
+			t.Fatalf("target = %q, want './kernel/fold/'", runner.targets[0])
 		}
 	})
 
@@ -214,25 +223,97 @@ func TestSelectTargets(t *testing.T) {
 		}
 	})
 
-	t.Run("bare-layer argument selects the layer with RelPath '.'", func(t *testing.T) {
+	t.Run("bare-layer argument selects the whole layer", func(t *testing.T) {
 		t.Parallel()
 		got, err := selectTargets(packages, []string{"core"})
 		if err != nil {
 			t.Fatalf("selectTargets err: %v", err)
 		}
-		if len(got) != 1 || got[0].Layer != "core" || got[0].RelPath != "." || got[0].Label != "core" {
+		if len(got) != 1 || got[0].Layer != "core" || got[0].Path != "core" || got[0].Label != "core" {
 			t.Fatalf("target = %+v, want core whole-layer", got)
 		}
 	})
 
-	t.Run("layer/subpath sets RelPath and Label", func(t *testing.T) {
+	t.Run("layer/subpath sets a repo-relative Path and Label", func(t *testing.T) {
 		t.Parallel()
 		got, err := selectTargets(packages, []string{"core/kernel/fold"})
 		if err != nil {
 			t.Fatalf("selectTargets err: %v", err)
 		}
-		if got[0].RelPath != "./kernel/fold/" || got[0].Label != "core/kernel/fold" {
-			t.Fatalf("target = %+v, want RelPath=./kernel/fold/ Label=core/kernel/fold", got[0])
+		if got[0].Path != "core/kernel/fold" || got[0].Label != "core/kernel/fold" {
+			t.Fatalf("target = %+v, want Path=core/kernel/fold Label=core/kernel/fold", got[0])
+		}
+		// Path is repo-relative, not layer-relative: renderTarget
+		// resolves the module root from it and derives the gremlins
+		// argument itself.
+		if got[0].Layer != "core" {
+			t.Fatalf("layer = %q, want core (thresholds come from the layer entry)", got[0].Layer)
+		}
+	})
+
+	t.Run("a multi-segment layer path is addressable", func(t *testing.T) {
+		t.Parallel()
+		// Regression: the resolver used to cut at the first "/", so a
+		// layer declared as `internal/checks` could only ever be
+		// looked up as `internal` — it reported the layer as
+		// undeclared while listing it as declared in the same
+		// message. Any repo whose layers are not single top-level
+		// directories could not target them at all.
+		nested := []Layer{
+			{Path: "internal/checks", Score: 80, Coverage: 90},
+			{Path: "internal/release", Score: 90, Coverage: 88},
+		}
+		got, err := selectTargets(nested, []string{"internal/checks"})
+		if err != nil {
+			t.Fatalf("selectTargets err: %v", err)
+		}
+		if len(got) != 1 || got[0].Layer != "internal/checks" || got[0].Path != "internal/checks" {
+			t.Fatalf("target = %+v, want the internal/checks layer", got)
+		}
+		if got[0].Score != 80 || got[0].Coverage != 90 {
+			t.Errorf("thresholds = (%d, %d), want the layer's own (80, 90)",
+				got[0].Score, got[0].Coverage)
+		}
+	})
+
+	t.Run("a subpath under a multi-segment layer keeps that layer's thresholds", func(t *testing.T) {
+		t.Parallel()
+		nested := []Layer{{Path: "internal/checks", Score: 80, Coverage: 90}}
+		got, err := selectTargets(nested, []string{"internal/checks/coverage"})
+		if err != nil {
+			t.Fatalf("selectTargets err: %v", err)
+		}
+		if got[0].Layer != "internal/checks" || got[0].Path != "internal/checks/coverage" {
+			t.Fatalf("target = %+v, want the subpath under internal/checks", got[0])
+		}
+		if got[0].Label != "internal/checks/coverage" {
+			t.Errorf("label = %q, want the full path", got[0].Label)
+		}
+	})
+
+	t.Run("longest declared prefix wins for nested layers", func(t *testing.T) {
+		t.Parallel()
+		// Both claim the path; the more specific one must win so it
+		// applies its own thresholds rather than the parent's.
+		nested := []Layer{
+			{Path: "internal", Score: 10, Coverage: 10},
+			{Path: "internal/checks", Score: 80, Coverage: 90},
+		}
+		got, err := selectTargets(nested, []string{"internal/checks/mutation"})
+		if err != nil {
+			t.Fatalf("selectTargets err: %v", err)
+		}
+		if got[0].Layer != "internal/checks" || got[0].Score != 80 {
+			t.Fatalf("target = %+v, want the more specific internal/checks entry", got[0])
+		}
+	})
+
+	t.Run("a prefix that is not a path boundary does not match", func(t *testing.T) {
+		t.Parallel()
+		// "internal/checksum" must not be claimed by "internal/checks".
+		nested := []Layer{{Path: "internal/checks", Score: 80}}
+		if _, err := selectTargets(nested, []string{"internal/checksum"}); err == nil {
+			t.Fatal("selectTargets returned nil, want no match on a partial segment")
 		}
 	})
 
@@ -253,21 +334,33 @@ func TestSelectTargets(t *testing.T) {
 func TestSplitLayerSubpath(t *testing.T) {
 	t.Parallel()
 
+	declared := []string{"foundation", "core", "internal/checks"}
+
 	cases := []struct {
 		in    string
 		layer string
 		sub   string
+		ok    bool
 	}{
-		{"foundation", "foundation", ""},
-		{"core/kernel/fold", "core", "kernel/fold"},
-		{"core/kernel/fold/", "core", "kernel/fold"},
-		{"", "", ""},
+		{"foundation", "foundation", "", true},
+		{"core/kernel/fold", "core", "kernel/fold", true},
+		{"core/kernel/fold/", "core", "kernel/fold", true},
+		{"/core/kernel", "core", "kernel", true},
+		// Multi-segment layer paths resolve against the declared set
+		// rather than being cut at the first separator.
+		{"internal/checks", "internal/checks", "", true},
+		{"internal/checks/mutation", "internal/checks", "mutation", true},
+		// No declared layer claims these.
+		{"", "", "", false},
+		{"unknown", "", "", false},
+		{"internal", "", "", false},
+		{"internal/checksum", "", "", false},
 	}
 	for _, tc := range cases {
-		gotLayer, gotSub := splitLayerSubpath(tc.in)
-		if gotLayer != tc.layer || gotSub != tc.sub {
-			t.Errorf("splitLayerSubpath(%q) = (%q, %q), want (%q, %q)",
-				tc.in, gotLayer, gotSub, tc.layer, tc.sub)
+		gotLayer, gotSub, gotOK := splitLayerSubpath(tc.in, declared)
+		if gotLayer != tc.layer || gotSub != tc.sub || gotOK != tc.ok {
+			t.Errorf("splitLayerSubpath(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				tc.in, gotLayer, gotSub, gotOK, tc.layer, tc.sub, tc.ok)
 		}
 	}
 }
@@ -483,16 +576,32 @@ func TestLayerDir(t *testing.T) {
 // fakeRunner satisfies [xexec.Runner] for tests. It records each
 // Run invocation as a string of the form `<dir>: <name> <args>`,
 // writes `output` to opts.Stdout, and returns runErr from the call.
+//
+// dirs and targets record the working directory and the final
+// positional argument of each call separately, so tests can assert
+// on the two independently. A substring match over the joined
+// `calls` string cannot distinguish "gremlins ran from the module
+// root with ./errs/" from "gremlins ran from errs/ with ." — the
+// distinction the working-directory contract turns on.
 type fakeRunner struct {
-	calls  []string
-	output string
-	runErr error
+	calls   []string
+	dirs    []string
+	targets []string
+	output  string
+	runErr  error
 }
 
 func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
 	// filepath.ToSlash normalises Windows backslashes so the call
 	// comparisons stay portable across operating systems.
-	f.calls = append(f.calls, filepath.ToSlash(opts.Dir)+": "+name+" "+strings.Join(args, " "))
+	dir := filepath.ToSlash(opts.Dir)
+	f.calls = append(f.calls, dir+": "+name+" "+strings.Join(args, " "))
+	f.dirs = append(f.dirs, dir)
+	if len(args) > 0 {
+		f.targets = append(f.targets, args[len(args)-1])
+	} else {
+		f.targets = append(f.targets, "")
+	}
 	if opts.Stdout != nil {
 		_, _ = opts.Stdout.Write([]byte(f.output))
 	}
@@ -501,6 +610,277 @@ func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, name string, arg
 
 func (*fakeRunner) LookPath(name string) (string, error) {
 	return "/usr/local/bin/" + name, nil
+}
+
+// TestResolveInvocation pins the working-directory contract every
+// gremlins call depends on: the tool resolves the module by walking
+// up from the filesystem root, not from its working directory, so it
+// must be invoked from the directory holding the target's go.mod.
+// Invoked from below that, it looks for `/go.mod` and exits 1 before
+// doing any work.
+func TestResolveInvocation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("single-module repo runs from the repo root", func(t *testing.T) {
+		t.Parallel()
+		root := buildTree(t, "errs")
+		writeGoMod(t, root, ".")
+
+		dir, pkgPath := resolveInvocation(root, "errs")
+		if dir != root {
+			t.Fatalf("dir = %q, want repo root %q", dir, root)
+		}
+		if pkgPath != "./errs/" {
+			t.Fatalf("path = %q, want './errs/'", pkgPath)
+		}
+	})
+
+	t.Run("layer owning a go.mod runs from the layer", func(t *testing.T) {
+		t.Parallel()
+		root := buildTree(t, "core")
+		writeGoMod(t, root, "core")
+
+		dir, pkgPath := resolveInvocation(root, "core")
+		if want := filepath.Join(root, "core"); dir != want {
+			t.Fatalf("dir = %q, want %q", dir, want)
+		}
+		if pkgPath != "." {
+			t.Fatalf("path = %q, want '.'", pkgPath)
+		}
+	})
+
+	t.Run("subpath resolves against the nearest enclosing go.mod", func(t *testing.T) {
+		t.Parallel()
+		root := buildTree(t, "core/kernel/fold")
+		writeGoMod(t, root, ".")
+		writeGoMod(t, root, "core")
+
+		// Both the root and `core` carry a go.mod; the nearest one
+		// wins so gremlins resolves the module the target belongs to.
+		dir, pkgPath := resolveInvocation(root, "core/kernel/fold")
+		if want := filepath.Join(root, "core"); dir != want {
+			t.Fatalf("dir = %q, want nearest enclosing module %q", dir, want)
+		}
+		if pkgPath != "./kernel/fold/" {
+			t.Fatalf("path = %q, want './kernel/fold/'", pkgPath)
+		}
+	})
+
+	t.Run("no go.mod anywhere falls back to the repo root", func(t *testing.T) {
+		t.Parallel()
+		root := buildTree(t, "errs")
+
+		// gremlins then reports the missing module itself, which is
+		// the right diagnostic for a repo that has none.
+		dir, pkgPath := resolveInvocation(root, "errs")
+		if dir != root {
+			t.Fatalf("dir = %q, want repo root %q", dir, root)
+		}
+		if pkgPath != "./errs/" {
+			t.Fatalf("path = %q, want './errs/'", pkgPath)
+		}
+	})
+
+	t.Run("a go.mod above the repo root is never selected", func(t *testing.T) {
+		t.Parallel()
+		outer := t.TempDir()
+		writeGoMod(t, outer, ".")
+		root := filepath.Join(outer, "repo")
+		if err := os.MkdirAll(filepath.Join(root, "errs"), 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+
+		// The walk stops at root; escaping it would run gremlins
+		// against an unrelated enclosing module.
+		dir, _ := resolveInvocation(root, "errs")
+		if dir != root {
+			t.Fatalf("dir = %q, want the walk to stop at %q", dir, root)
+		}
+	})
+}
+
+// TestRunGremlinsWorkingDirectory is the regression test for the
+// single-module case that could not run at all: every layer reported
+// "gremlins did not produce metrics: exit status 1" because gremlins
+// was invoked from inside the layer subpackage.
+func TestRunGremlinsWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	root := buildTree(t, "errs", "pool")
+	writeGoMod(t, root, ".")
+	runner := &fakeRunner{output: gremlinsOutput(99, 99)}
+
+	cfg := Config{Packages: []Layer{
+		{Path: "errs", Score: 99, Coverage: 99},
+		{Path: "pool", Score: 99, Coverage: 99},
+	}}
+	if err := Run(t.Context(), runner, io.Discard, io.Discard, root, cfg,
+		nil, nil, RunOptions{}); err != nil {
+		t.Fatalf("Run err: %v", err)
+	}
+
+	if len(runner.dirs) != 2 {
+		t.Fatalf("calls = %+v, want one per layer", runner.calls)
+	}
+	for i, layer := range []string{"errs", "pool"} {
+		if runner.dirs[i] != filepath.ToSlash(root) {
+			t.Errorf("layer %s: dir = %q, want the module root %q",
+				layer, runner.dirs[i], filepath.ToSlash(root))
+		}
+		if want := "./" + layer + "/"; runner.targets[i] != want {
+			t.Errorf("layer %s: target = %q, want %q", layer, runner.targets[i], want)
+		}
+	}
+}
+
+// TestTestCPUFlagIsNeverPassed guards the fix for a gremlins defect
+// that silently disables the whole gate.
+//
+// gremlins renders `--test-cpu N` into the per-mutant test command
+// as a single argv element containing a space (`-cpu 2`, see
+// internal/engine/executor.go). `go test` rejects the malformed
+// flag and exits non-zero before compiling; gremlins maps that exit
+// to KILLED. Every covered mutant is then "killed" no matter how
+// weak the suite is, so the score threshold can never fail.
+//
+// Verified empirically: a package whose only test asserts nothing
+// reports LIVED without the flag and KILLED with it.
+func TestTestCPUFlagIsNeverPassed(t *testing.T) {
+	t.Parallel()
+	root := buildTree(t, "errs")
+	writeGoMod(t, root, ".")
+	runner := &fakeRunner{output: gremlinsOutput(95, 95)}
+
+	// A non-zero TestCPU is the trigger, and it is the schema
+	// default — so the config that must NOT reach gremlins is
+	// exactly the one every repo gets.
+	cfg := Config{
+		Packages: []Layer{{Path: "errs", Score: 90, Coverage: 90}},
+		Gremlins: GremlinsConfig{Workers: 2, TestCPU: 2, TimeoutCoefficient: 30},
+	}
+	if err := Run(t.Context(), runner, io.Discard, io.Discard, root, cfg,
+		nil, nil, RunOptions{}); err != nil {
+		t.Fatalf("Run err: %v", err)
+	}
+
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls = %+v, want one", runner.calls)
+	}
+	if strings.Contains(runner.calls[0], "test-cpu") {
+		t.Errorf("call = %q, must not carry --test-cpu: the flag makes gremlins "+
+			"report every covered mutant KILLED regardless of test quality",
+			runner.calls[0])
+	}
+	// The other two knobs must still reach the tool.
+	for _, want := range []string{"--workers", "--timeout-coefficient"} {
+		if !strings.Contains(runner.calls[0], want) {
+			t.Errorf("call = %q, want it to carry %s", runner.calls[0], want)
+		}
+	}
+}
+
+// TestNoViableMutantsPasses covers a layer gremlins finds nothing to
+// mutate in — single-expression generic wrappers with no branch or
+// arithmetic to alter. gremlins emits no metrics for it, which is
+// indistinguishable from an inadequate suite by metrics alone, so
+// the "No results to report." signal is what separates the two.
+func TestNoViableMutantsPasses(t *testing.T) {
+	t.Parallel()
+
+	t.Run("passes with a notice", func(t *testing.T) {
+		t.Parallel()
+		root := buildTree(t, "pool")
+		writeGoMod(t, root, ".")
+		runner := &fakeRunner{
+			output: "Gathering coverage... done in 30.02842ms\n\nNo results to report.\n",
+		}
+
+		var stdout bytes.Buffer
+		cfg := Config{Packages: []Layer{{Path: "pool", Score: 99, Coverage: 99}}}
+		if err := Run(t.Context(), runner, &stdout, io.Discard, root, cfg,
+			nil, nil, RunOptions{}); err != nil {
+			t.Fatalf("Run err = %v, want nil (nothing to mutate is not a failure)", err)
+		}
+		if !strings.Contains(stdout.String(), "no viable mutants") {
+			t.Fatalf("stdout = %q, want a 'no viable mutants' notice", stdout.String())
+		}
+	})
+
+	t.Run("passes even when gremlins exits non-zero", func(t *testing.T) {
+		t.Parallel()
+		root := buildTree(t, "pool")
+		writeGoMod(t, root, ".")
+		// gremlins' exit code is not dependable in this state, so the
+		// output signal is checked ahead of the error.
+		runner := &fakeRunner{
+			output: "No results to report.\n",
+			runErr: errors.New("exit status 1"),
+		}
+
+		cfg := Config{Packages: []Layer{{Path: "pool", Score: 99, Coverage: 99}}}
+		if err := Run(t.Context(), runner, io.Discard, io.Discard, root, cfg,
+			nil, nil, RunOptions{}); err != nil {
+			t.Fatalf("Run err = %v, want nil", err)
+		}
+	})
+
+	t.Run("a genuine failure with no metrics still fails", func(t *testing.T) {
+		t.Parallel()
+		root := buildTree(t, "errs")
+		writeGoMod(t, root, ".")
+		runner := &fakeRunner{
+			output: "ERROR: not in a Go module: open /go.mod: no such file or directory\n",
+			runErr: errors.New("exit status 1"),
+		}
+
+		cfg := Config{Packages: []Layer{{Path: "errs", Score: 99, Coverage: 99}}}
+		if err := Run(t.Context(), runner, io.Discard, io.Discard, root, cfg,
+			nil, nil, RunOptions{}); err == nil {
+			t.Fatal("Run returned nil, want the gremlins failure surfaced")
+		}
+	})
+}
+
+// TestContributingFilesPrefix pins the path translation in the
+// failing-target breakdown. gremlins reports files relative to its
+// working directory, so the prefix must be the invoked module root —
+// prefixing with the layer double-counts it when the two differ.
+func TestContributingFilesPrefix(t *testing.T) {
+	t.Parallel()
+	root := buildTree(t, "errs")
+	writeGoMod(t, root, ".")
+	runner := &fakeRunner{output: strings.Join([]string{
+		"Killed: 1, Lived: 1, Not covered: 0",
+		"LIVED \"CONDITIONALS_BOUNDARY\" at errs/wrap.go:12:5",
+		"Test efficacy: 50.00%",
+		"Mutator coverage: 100.00%",
+	}, "\n")}
+
+	var stdout bytes.Buffer
+	cfg := Config{Packages: []Layer{{Path: "errs", Score: 99, Coverage: 99}}}
+	if err := Run(t.Context(), runner, &stdout, io.Discard, root, cfg,
+		nil, nil, RunOptions{}); err == nil {
+		t.Fatal("Run returned nil, want a below-threshold failure")
+	}
+	if strings.Contains(stdout.String(), "errs/errs/wrap.go") {
+		t.Fatalf("stdout = %q, want no doubled layer prefix", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "errs/wrap.go") {
+		t.Fatalf("stdout = %q, want the repo-relative path errs/wrap.go", stdout.String())
+	}
+}
+
+// writeGoMod writes a minimal go.mod at dir (relative to root) so
+// the module-root walk in resolveInvocation has something to find.
+func writeGoMod(t *testing.T, root, dir string) {
+	t.Helper()
+	full := filepath.Join(root, dir)
+	if err := os.MkdirAll(full, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", full, err)
+	}
+	body := "module example.test/" + filepath.ToSlash(dir) + "\n\ngo 1.26\n"
+	if err := os.WriteFile(filepath.Join(full, "go.mod"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write go.mod in %s: %v", full, err)
+	}
 }
 
 // buildTree creates the named directories under a fresh tempdir
@@ -526,4 +906,101 @@ func gremlinsOutput(score, coverage int) string {
 		"Test efficacy: " + strconv.Itoa(score) + "%",
 		"Mutator coverage: " + strconv.Itoa(coverage) + "%",
 	}, "\n") + "\n"
+}
+
+// TestExcludeRegexReachesGremlins covers the --exclude-files wiring:
+// the shared checks.excludes / checks.skips policy is compiled into
+// the single regex gremlins accepts, and the flag is omitted when
+// the policy is empty.
+func TestExcludeRegexReachesGremlins(t *testing.T) {
+	t.Parallel()
+
+	run := func(t *testing.T, excludes []policy.Exclude, skips []policy.Skip) string {
+		t.Helper()
+		root := buildTree(t, "errs")
+		writeGoMod(t, root, ".")
+		runner := &fakeRunner{output: gremlinsOutput(95, 95)}
+		cfg := Config{
+			Packages: []Layer{{Path: "errs", Score: 90, Coverage: 90}},
+			Gremlins: GremlinsConfig{Workers: 2, TimeoutCoefficient: 30},
+		}
+		if err := Run(t.Context(), runner, io.Discard, io.Discard, root, cfg,
+			excludes, skips, RunOptions{}); err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		return runner.calls[0]
+	}
+
+	t.Run("an empty policy omits the flag", func(t *testing.T) {
+		t.Parallel()
+		if call := run(t, nil, nil); strings.Contains(call, "--exclude-files") {
+			t.Errorf("call = %q, want no --exclude-files for an empty policy", call)
+		}
+	})
+
+	t.Run("excludes and skips compile into the flag", func(t *testing.T) {
+		t.Parallel()
+		call := run(t,
+			[]policy.Exclude{{Path: "**/*_test.go", Reason: "tests"}},
+			[]policy.Skip{{Label: "gen", FuncGlob: "*", FileGlob: "**/zz_generated.go"}})
+		if !strings.Contains(call, "--exclude-files") {
+			t.Fatalf("call = %q, want --exclude-files", call)
+		}
+		if !strings.Contains(call, "_test") {
+			t.Errorf("call = %q, want the exclude glob represented", call)
+		}
+	})
+}
+
+// TestVerboseMutantDump covers the --mutants report: a failing
+// layer with more contributing files than the cap collapses the
+// tail, and verbose appends the per-mutant locations.
+func TestVerboseMutantDump(t *testing.T) {
+	t.Parallel()
+
+	// 12 contributing files against a cap of 10, all LIVED so the
+	// layer fails and the diagnostic block renders.
+	lines := []string{"Killed: 0, Lived: 12, Not covered: 0"}
+	for i := range 12 {
+		lines = append(lines,
+			fmt.Sprintf("      LIVED CONDITIONALS_BOUNDARY at f%02d.go:%d:5", i, i+1))
+	}
+	lines = append(lines, "Test efficacy: 0.00%", "Mutator coverage: 100.00%")
+	out := strings.Join(lines, "\n") + "\n"
+
+	renderRun := func(t *testing.T, verbose bool) string {
+		t.Helper()
+		root := buildTree(t, "errs")
+		writeGoMod(t, root, ".")
+		runner := &fakeRunner{output: out}
+		cfg := Config{
+			Packages: []Layer{{Path: "errs", Score: 90, Coverage: 90}},
+			Gremlins: GremlinsConfig{Workers: 2, TimeoutCoefficient: 30},
+		}
+		var stdout bytes.Buffer
+		if err := Run(t.Context(), runner, &stdout, io.Discard, root, cfg,
+			nil, nil, RunOptions{Verbose: verbose}); err == nil {
+			t.Fatal("Run returned nil, want the below-threshold failure")
+		}
+		return stdout.String()
+	}
+
+	t.Run("caps the contributing-files list", func(t *testing.T) {
+		t.Parallel()
+		got := renderRun(t, false)
+		if !strings.Contains(got, "more file(s)") {
+			t.Errorf("stdout = %q, want the capped remainder reported", got)
+		}
+		if strings.Contains(got, "Non-killed mutants") {
+			t.Errorf("stdout = %q, want no mutant dump without --mutants", got)
+		}
+	})
+
+	t.Run("verbose appends the non-killed mutant locations", func(t *testing.T) {
+		t.Parallel()
+		got := renderRun(t, true)
+		if !strings.Contains(got, "Non-killed mutants") {
+			t.Errorf("stdout = %q, want the mutant dump", got)
+		}
+	})
 }

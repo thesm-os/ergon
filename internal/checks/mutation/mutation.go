@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -117,17 +118,20 @@ func Run(
 
 // target is a resolved (layer, threshold, subpath) tuple selectTargets
 // produces. label is the human-facing name printed in the per-target
-// header; relPath is the filesystem path (relative to the layer
-// directory) ergon hands to gremlins.
+// header; path is the repository-relative directory ergon mutates.
 type target struct {
 	// Layer is the top-level module directory (the prefix the
 	// layer's thresholds apply to).
 	Layer string
 
-	// RelPath is the filesystem path within the layer to mutate.
-	// "." mutates the entire layer; "./kernel/fold/" restricts the
-	// run to one subtree.
-	RelPath string
+	// Path is the repository-relative directory to mutate: the
+	// layer itself for a whole-layer run ("core"), or a subtree
+	// within it for a restricted run ("core/kernel/fold").
+	//
+	// The path is relative to the repository root rather than to
+	// the layer because gremlins must be invoked from the
+	// enclosing module root — see [resolveInvocation].
+	Path string
 
 	// Label is the human-facing target name printed in the per-
 	// section header. It is the layer for whole-layer runs and
@@ -164,7 +168,7 @@ func selectTargets(packages []Layer, requested []string) ([]target, error) {
 			p := byLayer[layer]
 			out = append(out, target{
 				Layer:    layer,
-				RelPath:  ".",
+				Path:     layer,
 				Label:    layer,
 				Score:    p.Score,
 				Coverage: resolveCoverage(p),
@@ -175,21 +179,21 @@ func selectTargets(packages []Layer, requested []string) ([]target, error) {
 
 	out := make([]target, 0, len(requested))
 	for _, raw := range requested {
-		head, sub := splitLayerSubpath(raw)
-		p, ok := byLayer[head]
-		if !ok {
+		head, sub, matched := splitLayerSubpath(raw, order)
+		if !matched {
 			return nil, fmt.Errorf("mutation: no thresholds entry for layer %q (declared: %s)",
-				head, strings.Join(order, ", "))
+				raw, strings.Join(order, ", "))
 		}
-		rel := "."
+		p := byLayer[head]
+		path := head
 		label := head
 		if sub != "" {
-			rel = "./" + sub + "/"
+			path = head + "/" + sub
 			label = head + "/" + sub
 		}
 		out = append(out, target{
 			Layer:    head,
-			RelPath:  rel,
+			Path:     path,
 			Label:    label,
 			Score:    p.Score,
 			Coverage: resolveCoverage(p),
@@ -198,12 +202,39 @@ func selectTargets(packages []Layer, requested []string) ([]target, error) {
 	return out, nil
 }
 
-// splitLayerSubpath divides "layer/sub/path" into ("layer",
-// "sub/path"). A bare "layer" yields ("layer", "").
-func splitLayerSubpath(s string) (layer, sub string) {
-	s = strings.TrimSuffix(s, "/")
-	head, tail, _ := strings.Cut(s, "/")
-	return head, tail
+// splitLayerSubpath divides a requested target into the declared
+// layer that owns it and the remaining subpath, e.g. with
+// `internal/checks` declared, "internal/checks/coverage" yields
+// ("internal/checks", "coverage") and a bare "internal/checks"
+// yields ("internal/checks", ""). Returns ok=false when no
+// declared layer claims the path.
+//
+// The match is longest-prefix over declared, NOT a split at the
+// first "/": a layer path is frequently more than one segment
+// (`internal/checks`, `backend/golang`), and cutting at the first
+// separator made every such layer unaddressable — the lookup only
+// ever tried the leading segment, so `ergon check mutation
+// internal/checks` reported the layer as undeclared while listing
+// it as declared in the same message.
+//
+// Longest-prefix also disambiguates nested declarations: with both
+// `internal` and `internal/checks` declared, the latter claims
+// "internal/checks/coverage" and keeps its own thresholds.
+func splitLayerSubpath(s string, declared []string) (layer, sub string, ok bool) {
+	s = strings.Trim(s, "/")
+	best := ""
+	for _, d := range declared {
+		if s != d && !strings.HasPrefix(s, d+"/") {
+			continue
+		}
+		if len(d) > len(best) {
+			best = d
+		}
+	}
+	if best == "" {
+		return "", "", false
+	}
+	return best, strings.TrimPrefix(strings.TrimPrefix(s, best), "/"), true
 }
 
 // resolveCoverage returns the effective coverage threshold for a
@@ -228,17 +259,30 @@ func renderTarget(
 ) bool {
 	details := fmt.Sprintf("score ≥ %d%% / coverage ≥ %d%%   %s",
 		t.Score, t.Coverage,
-		s.Dimmed(fmt.Sprintf("(workers=%d, test-cpu=%d)", gcfg.Workers, gcfg.TestCPU)))
+		s.Dimmed(fmt.Sprintf("(workers=%d)", gcfg.Workers)))
 	s.Header(stdout, t.Label, details)
 
+	dir, pkgPath := resolveInvocation(root, t.Path)
+
 	start := time.Now()
-	out, runErr := runGremlins(ctx, runner, filepath.Join(root, t.Layer), t.RelPath, gcfg, excludeRegex)
+	out, runErr := runGremlins(ctx, runner, dir, pkgPath, gcfg, excludeRegex)
 	elapsed := time.Since(start)
 
 	score, scoreOK := parsePercent(out, "Test efficacy:")
 	coverage, coverageOK := parsePercent(out, "Mutator coverage:")
 
 	if !scoreOK && !coverageOK {
+		// "No results to report." is gremlins' output for a target
+		// with nothing to mutate — a package of single-expression
+		// wrappers with no branch or arithmetic to alter. That is a
+		// legitimate pass, not an inadequate test suite, and it is
+		// checked before runErr because the tool's exit code in this
+		// state is not dependable (see the package docblock).
+		if hasNoViableMutants(out) {
+			fmt.Fprintf(stdout, "  %s   no viable mutants %s\n\n",
+				s.Dimmed("SKIP"), s.Dimmed(fmt.Sprintf("[%dms]", elapsed.Milliseconds())))
+			return false
+		}
 		if runErr != nil {
 			fmt.Fprintf(stdout, "  %s   gremlins did not produce metrics: %v\n\n",
 				s.Fail(), runErr)
@@ -269,7 +313,7 @@ func renderTarget(
 	fmt.Fprintln(stdout)
 	files := parseMutantFiles(out)
 	if len(files) > 0 {
-		writeContributingFiles(stdout, s, t.Layer, files)
+		writeContributingFiles(stdout, s, repoRelPrefix(root, dir), files)
 	}
 	if verbose && len(files) > 0 {
 		writeNonKilledMutants(stdout, s, out, files)
@@ -277,10 +321,84 @@ func renderTarget(
 	return true
 }
 
-// runGremlins invokes `gremlins unleash` against dir with the
-// filesystem path passed verbatim. Output is captured to a buffer
-// — the verdict is parsed from the captured log, not signalled by
-// the subprocess exit code (see the package docblock).
+// noViableMutantsSignal is gremlins' output for a target it found
+// nothing to mutate in. Distinct from a genuine failure: the tool
+// ran, gathered coverage, and legitimately had no work to do.
+const noViableMutantsSignal = "No results to report."
+
+// hasNoViableMutants reports whether gremlins' captured output
+// carries the "nothing to mutate" signal.
+func hasNoViableMutants(out string) bool {
+	return strings.Contains(out, noViableMutantsSignal)
+}
+
+// resolveInvocation returns the working directory to run gremlins
+// from and the package path to hand it, for a target directory
+// given relative to the repository root.
+//
+// gremlins resolves the module by walking up from the *filesystem*
+// root rather than from its working directory, so it must be
+// invoked from the directory holding the target's `go.mod` — run
+// below that it looks for `/go.mod`, fails, and exits 1 before
+// doing any work. The target is therefore expressed as a path
+// relative to that module root rather than by descending into it.
+//
+// The walk climbs from the target directory toward root and stops
+// at the first enclosing `go.mod`:
+//
+//   - Single-module repo, layer `errs`: the walk finds `<root>/go.mod`.
+//     Returns dir=<root>, path="./errs/".
+//   - Multi-module repo, layer `core` with its own `go.mod`: found on
+//     the first probe. Returns dir=<root>/core, path=".".
+//   - Subpath target `core/kernel/fold` under `<root>/core/go.mod`:
+//     Returns dir=<root>/core, path="./kernel/fold/".
+//
+// When no `go.mod` exists anywhere on the path, the repository root
+// is used. gremlins then reports the missing module itself, which is
+// the correct diagnostic for a repository that has none.
+func resolveInvocation(root, targetPath string) (dir, pkgPath string) {
+	root = filepath.Clean(root)
+	full := filepath.Join(root, targetPath)
+	for cur := full; ; cur = filepath.Dir(cur) {
+		if info, err := os.Stat(filepath.Join(cur, "go.mod")); err == nil && !info.IsDir() {
+			return cur, modRelPath(cur, full)
+		}
+		if cur == root || filepath.Dir(cur) == cur {
+			break
+		}
+	}
+	return root, modRelPath(root, full)
+}
+
+// repoRelPrefix returns the slash-separated path from the
+// repository root to dir, or the empty string when the two are the
+// same directory. Used to translate the paths gremlins reports
+// (relative to its working directory) back to repo-relative ones.
+func repoRelPrefix(root, dir string) string {
+	rel, err := filepath.Rel(filepath.Clean(root), dir)
+	if err != nil || rel == "." {
+		return ""
+	}
+	return filepath.ToSlash(rel)
+}
+
+// modRelPath expresses target as a gremlins path argument relative
+// to modRoot: "." when the two are the same directory, otherwise
+// the `./<rel>/` form gremlins accepts for a subtree.
+func modRelPath(modRoot, target string) string {
+	rel, err := filepath.Rel(modRoot, target)
+	if err != nil || rel == "." {
+		return "."
+	}
+	return "./" + filepath.ToSlash(rel) + "/"
+}
+
+// runGremlins invokes `gremlins unleash` from dir with relPath
+// passed verbatim as the target. dir must be the module root
+// holding the target's `go.mod` — [resolveInvocation] computes the
+// pair. Output is captured to a buffer — the verdict is parsed from
+// the captured log, not signalled by the subprocess exit code (see
+// the package docblock).
 //
 // excludeRegex is the precomputed `--exclude-files` value derived
 // from the shared policy lists; an empty string omits the flag.
@@ -289,11 +407,27 @@ func runGremlins(
 	cfg GremlinsConfig, excludeRegex string,
 ) (string, error) {
 	var buf bytes.Buffer
+	// --test-cpu is deliberately NOT passed. gremlins builds the
+	// per-mutant test command with
+	//
+	//	args = append(args, fmt.Sprintf("-cpu %d", m.testCPU))
+	//
+	// (internal/engine/executor.go), which appends `-cpu 2` as a
+	// SINGLE argv element containing a space. `go test` rejects the
+	// malformed flag and exits non-zero before compiling anything;
+	// gremlins maps that exit code to KILLED. The result is 100%
+	// test efficacy for every covered mutant regardless of whether
+	// the suite asserts anything at all — a gate that cannot fail.
+	//
+	// Verified against v0.6.0 and the @latest build: a package whose
+	// only test asserts nothing reports LIVED without the flag and
+	// KILLED with it. [GremlinsConfig.TestCPU] is retained in the
+	// schema (the config decoder is strict, so removing the key
+	// would break existing `.ergon.yaml` files) but is inert.
 	args := []string{
 		"unleash",
 		"--timeout-coefficient", strconv.Itoa(cfg.TimeoutCoefficient),
 		"--workers", strconv.Itoa(cfg.Workers),
-		"--test-cpu", strconv.Itoa(cfg.TestCPU),
 	}
 	if excludeRegex != "" {
 		args = append(args, "--exclude-files", excludeRegex)
@@ -446,16 +580,23 @@ func parseMutantFiles(out string) []fileBreakdown {
 // writeContributingFiles prints the top-N contributing files
 // section under a failing target. The "+N more files" tail keeps
 // the report scannable when many files contribute.
+//
+// prefix is the invoked module root relative to the repository
+// root (see [repoRelPrefix]); gremlins reports file paths relative
+// to its working directory, so prefixing restores a repo-relative
+// path the user can paste into an editor. Empty when gremlins ran
+// at the repository root, in which case the reported paths are
+// already repo-relative.
 func writeContributingFiles(
-	w io.Writer, s style.Style, layer string, files []fileBreakdown,
+	w io.Writer, s style.Style, prefix string, files []fileBreakdown,
 ) {
 	fmt.Fprintf(w, "  %s   %s\n",
 		s.Bolded("Contributing files"),
 		s.Dimmed("(L=lived / NC=not covered / TO=timed out)"))
 	limit := min(maxTopFiles, len(files))
 	for _, fb := range files[:limit] {
-		fmt.Fprintf(w, "    %4d   %s/%s   %s\n",
-			fb.Total, layer, fb.Path,
+		fmt.Fprintf(w, "    %4d   %s   %s\n",
+			fb.Total, path.Join(prefix, fb.Path),
 			s.Dimmed(fmt.Sprintf("(L:%d / NC:%d / TO:%d)",
 				fb.Lived, fb.NotCovered, fb.TimedOut)))
 	}

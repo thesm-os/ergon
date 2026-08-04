@@ -5,6 +5,7 @@ package bench
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -279,4 +280,100 @@ func TestWarnings(t *testing.T) {
 	if len(got) != 1 || got[0].Result.Bench != "X" {
 		t.Fatalf("warnings = %+v, want [X]", got)
 	}
+}
+
+// TestParseBenchstatCSVEdges covers the parser's reject and
+// fallback branches. benchstat's CSV is loosely structured — it
+// interleaves metric-block headers, file headers, geomean rows and
+// data rows — so every malformed or non-data row has to be skipped
+// without corrupting the result set.
+func TestParseBenchstatCSVEdges(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rows before any metric block are ignored", func(t *testing.T) {
+		t.Parallel()
+		// No `,sec/op` header, so currentMetric is never set and the
+		// data row below it has no metric to attach to.
+		out := "goos,linux\nBenchmarkFoo,100,±2%,90,±2%,-10%\n"
+		got, err := parseBenchstatCSV(out)
+		if err == nil {
+			t.Fatal("parseBenchstatCSV returned nil, want the no-metric-blocks error")
+		}
+		if got != nil {
+			t.Errorf("results = %+v, want none", got)
+		}
+	})
+
+	t.Run("geomean and short rows are skipped", func(t *testing.T) {
+		t.Parallel()
+		out := strings.Join([]string{
+			",sec/op",
+			"geomean,100,±2%,90,±2%,-10%",
+			"BenchmarkShort,1,2",
+			"BenchmarkOK,100,±2%,90,±2%,-10.00%",
+		}, "\n")
+		got, err := parseBenchstatCSV(out)
+		if err != nil {
+			t.Fatalf("parseBenchstatCSV: %v", err)
+		}
+		if len(got) != 1 || got[0].Bench != "BenchmarkOK" {
+			t.Fatalf("results = %+v, want only BenchmarkOK", got)
+		}
+	})
+
+	t.Run("unparseable numbers are skipped", func(t *testing.T) {
+		t.Parallel()
+		out := strings.Join([]string{
+			",sec/op",
+			"BenchmarkBadOld,notanumber,±2%,90,±2%,-10%",
+			"BenchmarkBadNew,100,±2%,notanumber,±2%,-10%",
+		}, "\n")
+		got, err := parseBenchstatCSV(out)
+		if err != nil {
+			t.Fatalf("parseBenchstatCSV: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("results = %+v, want both malformed rows skipped", got)
+		}
+	})
+
+	t.Run("a zero baseline yields a zero delta rather than dividing", func(t *testing.T) {
+		t.Parallel()
+		out := ",sec/op\nBenchmarkZero,0,±2%,90,±2%,+Inf%\n"
+		got, err := parseBenchstatCSV(out)
+		if err != nil {
+			t.Fatalf("parseBenchstatCSV: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("results = %+v, want one", got)
+		}
+		if got[0].DeltaPercent != 0 {
+			t.Errorf("DeltaPercent = %v, want 0 for a zero baseline", got[0].DeltaPercent)
+		}
+	})
+
+	t.Run("a row without the vs-base column is treated as significant", func(t *testing.T) {
+		t.Parallel()
+		// Exactly 5 fields: no column 6, so the ~ check cannot run.
+		out := ",sec/op\nBenchmarkFive,100,±2%,90,±2%\n"
+		got, err := parseBenchstatCSV(out)
+		if err != nil {
+			t.Fatalf("parseBenchstatCSV: %v", err)
+		}
+		if len(got) != 1 || !got[0].Significant {
+			t.Errorf("results = %+v, want the row marked significant", got)
+		}
+	})
+
+	t.Run("a tilde vs-base marks the row insignificant", func(t *testing.T) {
+		t.Parallel()
+		out := ",sec/op\nBenchmarkTilde,100,±2%,90,±2%,~\n"
+		got, err := parseBenchstatCSV(out)
+		if err != nil {
+			t.Fatalf("parseBenchstatCSV: %v", err)
+		}
+		if len(got) != 1 || got[0].Significant {
+			t.Errorf("results = %+v, want the row marked insignificant", got)
+		}
+	})
 }

@@ -163,3 +163,23 @@ func TestVersionFromTag(t *testing.T) {
 		}
 	})
 }
+
+// TestBumpSemverNoneAndUnsupported covers the two tail branches of
+// the level switch: BumpNone returns the version untouched, and an
+// out-of-range level is rejected rather than silently treated as a
+// no-op.
+func TestBumpSemverNoneAndUnsupported(t *testing.T) {
+	t.Parallel()
+
+	got, err := BumpSemver("1.2.3", BumpNone)
+	if err != nil {
+		t.Fatalf("BumpSemver(BumpNone) err: %v", err)
+	}
+	if got != "1.2.3" {
+		t.Errorf("BumpSemver(1.2.3, BumpNone) = %q, want it unchanged", got)
+	}
+
+	if _, err := BumpSemver("1.2.3", BumpLevel(99)); err == nil {
+		t.Fatal("BumpSemver returned nil, want an unsupported-level error")
+	}
+}

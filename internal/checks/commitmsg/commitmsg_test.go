@@ -223,3 +223,41 @@ func TestValidate(t *testing.T) {
 		}
 	})
 }
+
+// TestValidateEmptyMessage covers the empty-input branches: an
+// empty string and a message that is nothing but comment lines both
+// reduce to zero lines and must be rejected rather than indexing
+// past the end of the slice.
+func TestValidateEmptyMessage(t *testing.T) {
+	t.Parallel()
+
+	for _, in := range []string{"", "\n", "# just a comment\n", "#a\n#b\n"} {
+		if err := Validate(in, Config{}); err == nil {
+			t.Errorf("Validate(%q) = nil, want the empty-message rejection", in)
+		} else if !errors.Is(err, ErrInvalidFormat) {
+			t.Errorf("Validate(%q) err = %v, want ErrInvalidFormat", in, err)
+		}
+	}
+}
+
+// TestValidateBodyLineLengthDefaults pins the zero-value
+// behaviour: a zero BodyMaxLineLength does NOT disable the check,
+// it inherits Defaults()'s 100 via withDefaults. There is no
+// config path that turns the body-line limit off.
+func TestValidateBodyLineLengthDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{Types: []string{"feat"}, MaxSubjectLength: 72, BodyMaxLineLength: 0}
+
+	long := "feat: subject\n\n" + strings.Repeat("x", 500) + "\n"
+	if err := Validate(long, cfg); err == nil {
+		t.Fatal("Validate returned nil, want the default 100-byte limit applied")
+	} else if !errors.Is(err, ErrBodyLineTooLong) {
+		t.Fatalf("Validate err = %v, want ErrBodyLineTooLong", err)
+	}
+
+	short := "feat: subject\n\n" + strings.Repeat("x", 99) + "\n"
+	if err := Validate(short, cfg); err != nil {
+		t.Fatalf("Validate err = %v, want a 99-byte body line accepted", err)
+	}
+}

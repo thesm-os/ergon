@@ -494,3 +494,100 @@ func countTagCreates(calls []gitCall) int {
 func (*planFakeRunner) LookPath(name string) (string, error) {
 	return "/usr/local/bin/" + name, nil
 }
+
+// TestBuildPlanVersionPin covers the --version path, which bypasses
+// bump-level resolution entirely: every module is pinned at the
+// supplied version, `--bump MODULE=none` still exempts a module,
+// and a malformed --version is rejected before any tag is planned.
+func TestBuildPlanVersionPin(t *testing.T) {
+	t.Parallel()
+
+	mods := []modules.Module{{Dir: "."}, {Dir: "sub"}}
+
+	t.Run("pins every module at the supplied version", func(t *testing.T) {
+		t.Parallel()
+		runner := &planFakeRunner{} // no tags: every module starts at 0.0.0
+		plan, err := BuildPlan(t.Context(), runner, t.TempDir(), mods,
+			Options{Message: "release", Version: "v2.0.0"})
+		if err != nil {
+			t.Fatalf("BuildPlan err: %v", err)
+		}
+		if len(plan) != 2 {
+			t.Fatalf("plan = %+v, want one entry per module", plan)
+		}
+		for _, e := range plan {
+			if e.NewVersion != "2.0.0" {
+				t.Errorf("%s: NewVersion = %q, want 2.0.0", e.Module.Dir, e.NewVersion)
+			}
+			if !strings.Contains(e.Reason, "--version") {
+				t.Errorf("%s: Reason = %q, want it to name the pin", e.Module.Dir, e.Reason)
+			}
+		}
+		if plan[0].Tag != "v2.0.0" || plan[1].Tag != "sub/v2.0.0" {
+			t.Errorf("tags = (%q, %q), want the module tag prefixes applied",
+				plan[0].Tag, plan[1].Tag)
+		}
+	})
+
+	t.Run("a bare version without the v prefix is accepted", func(t *testing.T) {
+		t.Parallel()
+		runner := &planFakeRunner{}
+		plan, err := BuildPlan(t.Context(), runner, t.TempDir(),
+			[]modules.Module{{Dir: "."}}, Options{Message: "release", Version: "v1.2.3"})
+		if err != nil {
+			t.Fatalf("BuildPlan err: %v", err)
+		}
+		if plan[0].NewVersion != "1.2.3" {
+			t.Errorf("NewVersion = %q, want 1.2.3", plan[0].NewVersion)
+		}
+	})
+
+	t.Run("--bump MODULE=none exempts a module from the pin", func(t *testing.T) {
+		t.Parallel()
+		runner := &planFakeRunner{}
+		plan, err := BuildPlan(t.Context(), runner, t.TempDir(), mods, Options{
+			Message:   "release",
+			Version:   "v2.0.0",
+			Overrides: map[string]BumpLevel{"sub": BumpNone},
+		})
+		if err != nil {
+			t.Fatalf("BuildPlan err: %v", err)
+		}
+		if plan[1].Tag != "" {
+			t.Errorf("sub Tag = %q, want no tag for the exempted module", plan[1].Tag)
+		}
+		if !strings.Contains(plan[1].Reason, "none") {
+			t.Errorf("sub Reason = %q, want it to name the override", plan[1].Reason)
+		}
+		if plan[0].NewVersion != "2.0.0" {
+			t.Errorf("root NewVersion = %q, want the pin still applied", plan[0].NewVersion)
+		}
+	})
+
+	t.Run("a malformed --version is rejected", func(t *testing.T) {
+		t.Parallel()
+		runner := &planFakeRunner{}
+		_, err := BuildPlan(t.Context(), runner, t.TempDir(),
+			[]modules.Module{{Dir: "."}}, Options{Message: "release", Version: "not-a-version"})
+		if err == nil {
+			t.Fatal("BuildPlan returned nil, want the malformed --version rejected")
+		}
+		if !strings.Contains(err.Error(), "--version") {
+			t.Errorf("err = %v, want it to name the flag", err)
+		}
+	})
+}
+
+// TestBuildPlanGitFailure covers the error propagation from the
+// per-module tag lookup: BuildPlan aborts rather than planning a
+// release against an unknown current version.
+func TestBuildPlanGitFailure(t *testing.T) {
+	t.Parallel()
+
+	runner := &planFakeRunner{runErr: errors.New("not a git repository")}
+	_, err := BuildPlan(t.Context(), runner, t.TempDir(),
+		[]modules.Module{{Dir: "."}}, Options{Message: "release"})
+	if err == nil {
+		t.Fatal("BuildPlan returned nil, want the git failure propagated")
+	}
+}

@@ -84,6 +84,17 @@ linters:
             - pkg: "github.com/pkg/errors"
               desc: "use stdlib errors + fmt.Errorf"
 
+    goconst:
+      # Do not count occurrences in test files. The exclusion rule
+      # below already declares that tests legitimately repeat
+      # goconst-tripping strings, but it only suppresses findings
+      # *reported at* a _test.go path — goconst still tallies test
+      # occurrences and reports the issue against the production
+      # file that holds the literal. A table of command names in a
+      # test would otherwise force `const` declarations into
+      # cmd/ergon/cmds purely to satisfy the counter.
+      ignore-tests: true
+
     exhaustive:
       default-signifies-exhaustive: true
       check:

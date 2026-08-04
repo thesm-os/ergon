@@ -87,10 +87,11 @@ func Run(
 		return err
 	}
 
-	stats, err := runGobcoAllPackages(ctx, runner, stderr, root, pkgs, opts.Workers)
+	stats, err := runGobcoAllPackages(ctx, runner, stderr, root, pkgs, imports, opts.Workers)
 	if err != nil {
 		return err
 	}
+	writeSkipNotice(stdout, s, stats)
 
 	targets, claimIdx := coverage.SelectTargets(cfg.Packages, opts.Targets)
 	if len(targets) == 0 {
@@ -115,6 +116,43 @@ func Run(
 	}
 	s.FinalVerdict(stdout, true, "every required layer meets its branch threshold")
 	return nil
+}
+
+// writeSkipNotice reports every package gobco could not measure
+// because it reaches across workspace modules, naming the
+// dependency responsible.
+//
+// The notice is not cosmetic. A skipped package contributes no
+// conditions, so the layers it belongs to report a percentage over
+// a smaller denominator than the reader expects — and a layer whose
+// packages are ALL skipped reports "no conditions in scope" and
+// passes. Stating which packages were dropped is what keeps that
+// from reading as a clean result.
+func writeSkipNotice(w io.Writer, s style.Style, stats []pkgStats) {
+	var skipped []pkgStats
+	for _, st := range stats {
+		if st.SkippedFor != "" {
+			skipped = append(skipped, st)
+		}
+	}
+	if len(skipped) == 0 {
+		return
+	}
+
+	s.Header(w, "branch", "packages gobco could not measure")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  %s\n", s.Dimmed(
+		"gobco instruments by copying the module to a temp directory, which "+
+			"loses the go.work context and breaks relative replace targets. "+
+			"Packages importing another workspace module cannot be measured."))
+	fmt.Fprintln(w)
+	for _, st := range skipped {
+		fmt.Fprintf(w, "  %s   %s %s\n",
+			s.Dimmed("SKIP"), st.Pkg.RepoRel,
+			s.Dimmed("(imports "+st.SkippedFor+")"))
+	}
+	fmt.Fprintf(w, "\n  %s\n\n", s.Dimmed(fmt.Sprintf(
+		"%d package(s) excluded from every layer aggregate below.", len(skipped))))
 }
 
 // renderTarget writes one per-layer section: header, branch
@@ -167,9 +205,16 @@ func listWorkspacePackages(
 	for _, ip := range imports {
 		moduleDir := filepath.Join(root, ip.Dir)
 		var buf bytes.Buffer
+		// Test imports are included: gobco runs the package's tests,
+		// so a cross-module import reached only from a _test.go file
+		// breaks the relocated build just the same.
 		err := runner.Run(ctx,
 			xexec.Options{Dir: moduleDir, Stdout: &buf, Stderr: &buf},
-			"go", "list", "-f", "{{.ImportPath}} {{.Dir}}", "./...")
+			"go", "list", "-f",
+			"{{.ImportPath}} {{.Dir}}{{range .Imports}} {{.}}"+
+				"{{end}}{{range .TestImports}} {{.}}{{end}}"+
+				"{{range .XTestImports}} {{.}}{{end}}",
+			"./...")
 		if err != nil {
 			return nil, fmt.Errorf(
 				"branch: go list ./... in %s: %w: %s",
@@ -191,6 +236,7 @@ func listWorkspacePackages(
 				ImportPath: importPath,
 				Dir:        pkgDir,
 				RepoRel:    filepath.ToSlash(rel),
+				Imports:    fields[2:],
 			})
 		}
 	}
@@ -212,6 +258,70 @@ type pkgInfo struct {
 	// `file:line:col` Start token to derive a repo-relative
 	// file path the gate's excludes / skips match against.
 	RepoRel string
+
+	// Imports is every package this one imports, including from
+	// its test files. Used by [coupledModule] to detect the
+	// workspace layout gobco cannot measure.
+	Imports []string
+}
+
+// coupledModule reports the import path of another workspace module
+// this package depends on, if any.
+//
+// gobco instruments by copying the enclosing module to a temp
+// directory and running `go test` there. A `go.work` file is a
+// property of where a directory sits in the tree, so relocation
+// always loses it — and a relative `replace` target (`../alpha`)
+// stops resolving for the same reason. A package that reaches
+// across workspace modules therefore cannot be measured, and
+// gobco reports it as an opaque `[setup failed]`.
+//
+// Single-module repositories never match: with one entry in
+// imports there is no other module to couple to.
+func coupledModule(pkg pkgInfo, imports []modules.Import) (string, bool) {
+	own := owningModuleDir(pkg.RepoRel, imports)
+	for _, imp := range pkg.Imports {
+		// Attribute the import to the module with the LONGEST
+		// matching path. Module paths nest — `example.test/ws` is a
+		// prefix of `example.test/ws/alpha` — so any-match would
+		// attribute `example.test/ws/alpha/sub` to the root module
+		// and report a coupling for what is really an intra-module
+		// import.
+		owner, ownerDir := "", ""
+		for _, ip := range imports {
+			if ip.ImportPath == "" {
+				continue
+			}
+			if imp != ip.ImportPath && !strings.HasPrefix(imp, ip.ImportPath+"/") {
+				continue
+			}
+			if len(ip.ImportPath) > len(owner) {
+				owner, ownerDir = ip.ImportPath, ip.Dir
+			}
+		}
+		if owner != "" && ownerDir != own {
+			return owner, true
+		}
+	}
+	return "", false
+}
+
+// owningModuleDir returns the module directory that owns the
+// package at repoRel — the longest module Dir that prefixes it.
+func owningModuleDir(repoRel string, imports []modules.Import) string {
+	best := ""
+	bestLen := -1
+	for _, ip := range imports {
+		base := ip.Dir
+		if base == "." {
+			base = ""
+		}
+		matched := base == "" || repoRel == base || strings.HasPrefix(repoRel, base+"/")
+		if matched && len(base) > bestLen {
+			best, bestLen = ip.Dir, len(base)
+		}
+	}
+	return best
 }
 
 // condRecord mirrors one entry in gobco's `-stats` JSON output:
@@ -230,6 +340,14 @@ type condRecord struct {
 type pkgStats struct {
 	Pkg     pkgInfo
 	Records []condRecord
+
+	// SkippedFor names the workspace module this package depends
+	// on when gobco could not measure it (see [coupledModule]).
+	// Empty when the package was measured. A skipped package
+	// contributes no conditions, so [Run] reports the set
+	// explicitly rather than letting the layer percentage quietly
+	// be computed over a smaller denominator.
+	SkippedFor string
 }
 
 // runGobcoAllPackages spawns a bounded worker pool that runs
@@ -238,7 +356,7 @@ type pkgStats struct {
 // are cleaned up before return.
 func runGobcoAllPackages(
 	ctx context.Context, runner xexec.Runner, stderr io.Writer,
-	root string, pkgs []pkgInfo, workers int,
+	root string, pkgs []pkgInfo, imports []modules.Import, workers int,
 ) ([]pkgStats, error) {
 	if workers <= 0 {
 		workers = max(2, runtime.NumCPU()/2)
@@ -267,7 +385,19 @@ func runGobcoAllPackages(
 			for j := range jobs {
 				rec, gerr := runGobcoOne(ctx, runner, root, j.pkg,
 					filepath.Join(tmpDir, fmt.Sprintf("%d.json", j.idx)))
-				results <- result{idx: j.idx, stats: pkgStats{Pkg: j.pkg, Records: rec}, err: gerr}
+				st := pkgStats{Pkg: j.pkg, Records: rec}
+				// A failure is demoted to a skip only when the
+				// package reaches across workspace modules — the
+				// one shape gobco structurally cannot measure.
+				// Every other failure still fails the run, so this
+				// cannot mask a real breakage.
+				if gerr != nil {
+					if dep, coupled := coupledModule(j.pkg, imports); coupled {
+						st.SkippedFor = dep
+						gerr = nil
+					}
+				}
+				results <- result{idx: j.idx, stats: st, err: gerr}
 			}
 		})
 	}
