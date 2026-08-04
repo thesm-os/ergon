@@ -234,11 +234,15 @@ checks:
   # `go test` rejected the malformed flag, exited non-zero, and
   # gremlins read that as a killed mutant. Every covered mutant came
   # back KILLED regardless of test quality — 766 killed / 0 lived
-  # across this repo, in 430ms. ergon no longer passes the flag
-  # (`checks.mutation.gremlins.test_cpu` is now inert), and the same
-  # run reports real survivors in ~10s. If a future change makes
-  # this gate implausibly fast or reports zero LIVED tree-wide,
-  # suspect the invocation before believing the score.
+  # across this repo, in 430ms. ergon no longer passes the flag, and
+  # the same run reports real survivors in ~10s.
+  #
+  # `checks.mutation.gremlins.test_cpu` still bounds the mutated
+  # binaries, but travels as GOMAXPROCS in the subprocess
+  # environment where `go test` reads it at startup, never through
+  # gremlins' argv rendering. If a future change makes this gate
+  # implausibly fast or reports zero LIVED tree-wide, suspect the
+  # invocation before believing the score.
   #
   # Thresholds below are a BASELINE measured after the fix, not a
   # target: they stop the numbers regressing while the surviving
@@ -262,9 +266,12 @@ checks:
     # from `checks.excludes` / `checks.skips` above; gremlins'
     # `--exclude-files` is computed at call time.
     #
-    # test_cpu is INERT — see the note above. It is retained only
-    # because the config decoder is strict, so deleting the key
-    # would break any `.ergon.yaml` that still sets it.
+    # test_cpu bounds each mutated test binary's parallelism, sent
+    # as GOMAXPROCS in the subprocess environment rather than as
+    # gremlins' broken `--test-cpu` flag — see the note above.
+    # Leaving it at 0 lets mutants inherit the host's core count,
+    # which turns blocked-but-killable mutants into timeouts, and
+    # timeouts are excluded from the efficacy denominator.
     gremlins:
       workers: 2
       test_cpu: 2

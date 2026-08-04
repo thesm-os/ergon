@@ -583,10 +583,15 @@ func TestLayerDir(t *testing.T) {
 // `calls` string cannot distinguish "gremlins ran from the module
 // root with ./errs/" from "gremlins ran from errs/ with ." — the
 // distinction the working-directory contract turns on.
+//
+// envs records opts.Env per call for the same reason: the
+// GOMAXPROCS bound never appears in argv, so no assertion over
+// `calls` can see whether it was transmitted.
 type fakeRunner struct {
 	calls   []string
 	dirs    []string
 	targets []string
+	envs    [][]string
 	output  string
 	runErr  error
 }
@@ -597,6 +602,7 @@ func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, name string, arg
 	dir := filepath.ToSlash(opts.Dir)
 	f.calls = append(f.calls, dir+": "+name+" "+strings.Join(args, " "))
 	f.dirs = append(f.dirs, dir)
+	f.envs = append(f.envs, opts.Env)
 	if len(args) > 0 {
 		f.targets = append(f.targets, args[len(args)-1])
 	} else {
@@ -776,6 +782,70 @@ func TestTestCPUFlagIsNeverPassed(t *testing.T) {
 			t.Errorf("call = %q, want it to carry %s", runner.calls[0], want)
 		}
 	}
+}
+
+// TestTestCPUReachesGremlinsAsGOMAXPROCS pins the replacement for
+// the unusable --test-cpu flag: the bound travels in the subprocess
+// environment, where the mutated test binary reads it at runtime
+// startup instead of through gremlins' malformed argv rendering.
+//
+// Left unbounded, mutated binaries inherit the host's core count
+// and a concurrency-sensitive package blocks rather than failing
+// fast, spending the whole TimeoutCoefficient budget per mutant and
+// reporting killable mutants as timeouts — which gremlins excludes
+// from the efficacy denominator, inflating the score.
+//
+// See [TestTestCPUFlagIsNeverPassed] for the other half of the
+// contract: the flag itself must stay off the command line.
+func TestTestCPUReachesGremlinsAsGOMAXPROCS(t *testing.T) {
+	t.Parallel()
+
+	// Driven through Run rather than runGremlins directly, so the
+	// assertion covers the whole config path: a value that stops
+	// short anywhere between Config and the subprocess fails here.
+	t.Run("a set TestCPU becomes GOMAXPROCS", func(t *testing.T) {
+		t.Parallel()
+		root := buildTree(t, "errs")
+		writeGoMod(t, root, ".")
+		runner := &fakeRunner{output: gremlinsOutput(95, 95)}
+		cfg := Config{
+			Packages: []Layer{{Path: "errs", Score: 90, Coverage: 90}},
+			Gremlins: GremlinsConfig{Workers: 2, TestCPU: 4, TimeoutCoefficient: 30},
+		}
+		if err := Run(t.Context(), runner, io.Discard, io.Discard, root, cfg,
+			nil, nil, RunOptions{}); err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		if len(runner.envs) != 1 {
+			t.Fatalf("envs = %+v, want one call", runner.envs)
+		}
+		found := false
+		for _, kv := range runner.envs[0] {
+			if kv == "GOMAXPROCS=4" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("env = %q, want it to carry GOMAXPROCS=4", runner.envs[0])
+		}
+	})
+
+	// Driven through runGremlins directly: withDefaults substitutes
+	// the schema default for a zero TestCPU, so the unset case can
+	// never be reached through Run.
+	t.Run("an unset TestCPU leaves the environment alone", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{output: gremlinsOutput(95, 95)}
+		cfg := GremlinsConfig{Workers: 2, TestCPU: 0, TimeoutCoefficient: 30}
+		if _, err := runGremlins(
+			t.Context(), runner, t.TempDir(), "./errs/", cfg, "",
+		); err != nil {
+			t.Fatalf("runGremlins err: %v", err)
+		}
+		if got := runner.envs[0]; len(got) != 0 {
+			t.Errorf("env = %q, want empty when TestCPU is unset", got)
+		}
+	})
 }
 
 // TestNoViableMutantsPasses covers a layer gremlins finds nothing to

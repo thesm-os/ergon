@@ -402,6 +402,13 @@ func modRelPath(modRoot, target string) string {
 //
 // excludeRegex is the precomputed `--exclude-files` value derived
 // from the shared policy lists; an empty string omits the flag.
+//
+// # Concurrency
+//
+// cfg.TestCPU is transmitted as GOMAXPROCS in the subprocess
+// environment, bounding the parallelism of every mutated test
+// binary gremlins spawns. Zero omits the variable and leaves the
+// child inheriting the host's core count.
 func runGremlins(
 	ctx context.Context, runner xexec.Runner, dir, relPath string,
 	cfg GremlinsConfig, excludeRegex string,
@@ -412,18 +419,27 @@ func runGremlins(
 	//
 	//	args = append(args, fmt.Sprintf("-cpu %d", m.testCPU))
 	//
-	// (internal/engine/executor.go), which appends `-cpu 2` as a
-	// SINGLE argv element containing a space. `go test` rejects the
-	// malformed flag and exits non-zero before compiling anything;
-	// gremlins maps that exit code to KILLED. The result is 100%
-	// test efficacy for every covered mutant regardless of whether
-	// the suite asserts anything at all — a gate that cannot fail.
+	// (internal/engine/executor.go:231), which appends `-cpu 2` as a
+	// SINGLE argv element containing a space, handed straight to
+	// argv by exec.CommandContext (executor.go:197) with no shell to
+	// re-split it. `go test` reads `-cpu` and takes the FOLLOWING
+	// argument — the package pattern — as its value, leaving no
+	// pattern behind; it falls back to `.`, finds no Go files at the
+	// module root, and exits 1 without compiling a test. gremlins
+	// maps that exit to KILLED, so every covered mutant is killed no
+	// matter what the suite asserts — a gate that cannot fail.
 	//
-	// Verified against v0.6.0 and the @latest build: a package whose
-	// only test asserts nothing reports LIVED without the flag and
-	// KILLED with it. [GremlinsConfig.TestCPU] is retained in the
-	// schema (the config decoder is strict, so removing the key
-	// would break existing `.ergon.yaml` files) but is inert.
+	// Measured on internal/exec against v0.6.0 on 2026-08-04:
+	// without the flag 3 killed / 1 lived / 75.0% efficacy; with it
+	// 4 killed / 0 lived / 100.0%. The survivor is real, and the
+	// flag hides it.
+	//
+	// [GremlinsConfig.TestCPU] instead reaches the mutated test
+	// binaries as GOMAXPROCS in the subprocess environment, which
+	// bounds their parallelism without routing through the broken
+	// flag. gremlins itself inherits the same value; --workers
+	// already bounds its useful concurrency, so that cost is
+	// accepted in exchange for verdicts that are real.
 	args := []string{
 		"unleash",
 		"--timeout-coefficient", strconv.Itoa(cfg.TimeoutCoefficient),
@@ -433,9 +449,11 @@ func runGremlins(
 		args = append(args, "--exclude-files", excludeRegex)
 	}
 	args = append(args, relPath)
-	err := runner.Run(ctx,
-		xexec.Options{Dir: dir, Stdout: &buf, Stderr: &buf},
-		"gremlins", args...)
+	opts := xexec.Options{Dir: dir, Stdout: &buf, Stderr: &buf}
+	if cfg.TestCPU > 0 {
+		opts.Env = []string{"GOMAXPROCS=" + strconv.Itoa(cfg.TestCPU)}
+	}
+	err := runner.Run(ctx, opts, "gremlins", args...)
 	return buf.String(), err
 }
 

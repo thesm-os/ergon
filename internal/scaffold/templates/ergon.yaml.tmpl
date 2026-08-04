@@ -231,11 +231,30 @@ checks:
     #     - path: internal/...
     #       score: 80
     #       coverage: 80
-    # gremlins invocation policy. Workers + test_cpu bound CPU
-    # usage; timeout_coefficient tolerates slow-but-finite tests
+    # gremlins invocation policy. Workers bounds CPU usage;
+    # timeout_coefficient tolerates slow-but-finite tests
     # (gremlins' default of 3 produces spurious timeouts). File
     # exclusion comes from `checks.excludes` / `checks.skips`
     # above; gremlins' `--exclude-files` is computed at call time.
+    #
+    # test_cpu bounds each mutated test binary's parallelism. It
+    # is sent as GOMAXPROCS in the gremlins subprocess environment,
+    # NOT as gremlins' own `--test-cpu` flag: gremlins renders that
+    # flag as a single argv element containing a space (`-cpu 2`),
+    # `go test` rejects it and exits non-zero before compiling, and
+    # gremlins reads the exit as a killed mutant — reporting every
+    # covered mutant KILLED regardless of what the suite asserts.
+    #
+    # Leaving it at 0 lets mutated binaries inherit the host's core
+    # count, which makes concurrency-sensitive packages block
+    # rather than fail fast: each one burns the full
+    # timeout_coefficient budget and is scored as a timeout, and
+    # gremlins excludes timeouts from the efficacy denominator —
+    # raising the reported score while lowering real coverage.
+    #
+    # If this gate ever runs implausibly fast or reports zero
+    # LIVED tree-wide, suspect the invocation before believing
+    # the score.
     gremlins:
       workers: 2
       test_cpu: 2
