@@ -59,8 +59,11 @@ archives:
       - README*
       - completions/*
       # docs/ ships so the README's relative links resolve inside
-      # the archive, not just on GitHub.
-      - docs/**/*
+      # the archive, not just on GitHub. `docs/**` and not
+      # `docs/**/*`: the latter requires a directory component and
+      # silently drops docs/README.md, which is the router every
+      # link in the shipped README points at.
+      - docs/**
 
 source:
   enabled: true
