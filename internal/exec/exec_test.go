@@ -38,44 +38,6 @@ func TestCommand(t *testing.T) {
 		}
 	})
 
-	t.Run("Run passes Options.Env through to the subprocess", func(t *testing.T) {
-		t.Parallel()
-		if runtime.GOOS == "windows" {
-			t.Skip("sh not portable to Windows")
-		}
-		var stdout bytes.Buffer
-		err := Command{}.Run(t.Context(),
-			Options{Stdout: &stdout, Env: []string{"ERGON_ENV_PROBE=child"}},
-			"sh", "-c", `printf "%s" "$ERGON_ENV_PROBE"`)
-		if err != nil {
-			t.Fatalf("Run err: %v", err)
-		}
-		if got := stdout.String(); got != "child" {
-			t.Fatalf("stdout = %q, want %q", got, "child")
-		}
-	})
-
-	t.Run("Run appends Env rather than replacing the environment", func(t *testing.T) {
-		t.Parallel()
-		if runtime.GOOS == "windows" {
-			t.Skip("sh not portable to Windows")
-		}
-		// PATH is the load-bearing case. os/exec treats a non-nil
-		// Env as the complete environment, so assigning opts.Env
-		// bare would strip PATH and break the tool lookup of every
-		// ergon call downstream.
-		var stdout bytes.Buffer
-		err := Command{}.Run(t.Context(),
-			Options{Stdout: &stdout, Env: []string{"ERGON_ENV_PROBE=child"}},
-			"sh", "-c", `printf "%s" "${PATH:+set}"`)
-		if err != nil {
-			t.Fatalf("Run err: %v", err)
-		}
-		if got := stdout.String(); got != "set" {
-			t.Fatalf("PATH = %q, want it inherited; Env must append", got)
-		}
-	})
-
 	t.Run("Run propagates non-zero exit as an error", func(t *testing.T) {
 		t.Parallel()
 		err := Command{}.Run(t.Context(), Options{}, "false")
@@ -118,32 +80,6 @@ func TestCommand(t *testing.T) {
 			t.Fatalf("LookPath err = %v, want ErrNotFound", err)
 		}
 	})
-}
-
-// TestCommandEnvOverride pins the precedence half of the
-// [Options.Env] contract: a pair supplied there beats the same key
-// inherited from the parent, which is what lets a caller bound a
-// child's GOMAXPROCS on a host that already exports one.
-//
-// Deliberately not parallel, and deliberately not a subtest of
-// [TestCommand]: t.Setenv mutates process-wide state and panics
-// under any parallel ancestor, and the contract cannot be observed
-// without a value the parent process actually holds.
-func TestCommandEnvOverride(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("sh not portable to Windows")
-	}
-	t.Setenv("ERGON_ENV_PROBE", "parent")
-	var stdout bytes.Buffer
-	err := Command{}.Run(t.Context(),
-		Options{Stdout: &stdout, Env: []string{"ERGON_ENV_PROBE=child"}},
-		"sh", "-c", `printf "%s" "$ERGON_ENV_PROBE"`)
-	if err != nil {
-		t.Fatalf("Run err: %v", err)
-	}
-	if got := stdout.String(); got != "child" {
-		t.Fatalf("stdout = %q, want %q; a later Env entry must win", got, "child")
-	}
 }
 
 // TestIsNoPackagesSignal pins the public detector against the

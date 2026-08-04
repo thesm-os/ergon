@@ -251,6 +251,10 @@ func resolveCoverage(l Layer) int {
 // renderTarget runs gremlins against one target and writes the
 // per-target section. Returns true when at least one threshold
 // missed.
+//
+// The score checked against the threshold is [effectiveScore], not
+// the figure gremlins printed: timed-out mutants are unevaluated,
+// and gremlins omits them from its own denominator.
 func renderTarget(
 	ctx context.Context, runner xexec.Runner,
 	stdout io.Writer, s style.Style,
@@ -298,10 +302,16 @@ func renderTarget(
 		counts.Killed, counts.Lived, counts.NotCovered, counts.TimedOut,
 		s.Dimmed(formatElapsed(elapsed)))
 
-	passScore := score >= float64(t.Score)
+	effective := effectiveScore(score, counts)
+	passScore := effective >= float64(t.Score)
 	passCoverage := coverage >= float64(t.Coverage)
 	fmt.Fprintf(stdout, "  Score:     %5.1f%%   (≥ %d%%)   %s\n",
-		score, t.Score, verdictMark(s, passScore))
+		effective, t.Score, verdictMark(s, passScore))
+	if counts.TimedOut > 0 {
+		fmt.Fprintf(stdout, "             %s\n", s.Dimmed(fmt.Sprintf(
+			"gremlins reported %.1f%%; %d timed out and are counted unkilled",
+			score, counts.TimedOut)))
+	}
 	fmt.Fprintf(stdout, "  Coverage:  %5.1f%%   (≥ %d%%)   %s\n",
 		coverage, t.Coverage, verdictMark(s, passCoverage))
 
@@ -402,13 +412,6 @@ func modRelPath(modRoot, target string) string {
 //
 // excludeRegex is the precomputed `--exclude-files` value derived
 // from the shared policy lists; an empty string omits the flag.
-//
-// # Concurrency
-//
-// cfg.TestCPU is transmitted as GOMAXPROCS in the subprocess
-// environment, bounding the parallelism of every mutated test
-// binary gremlins spawns. Zero omits the variable and leaves the
-// child inheriting the host's core count.
 func runGremlins(
 	ctx context.Context, runner xexec.Runner, dir, relPath string,
 	cfg GremlinsConfig, excludeRegex string,
@@ -434,12 +437,14 @@ func runGremlins(
 	// 4 killed / 0 lived / 100.0%. The survivor is real, and the
 	// flag hides it.
 	//
-	// [GremlinsConfig.TestCPU] instead reaches the mutated test
-	// binaries as GOMAXPROCS in the subprocess environment, which
-	// bounds their parallelism without routing through the broken
-	// flag. gremlins itself inherits the same value; --workers
-	// already bounds its useful concurrency, so that cost is
-	// accepted in exchange for verdicts that are real.
+	// [GremlinsConfig.TestCPU] is retained in the schema (the config
+	// decoder is strict, so removing the key would break existing
+	// `.ergon.yaml` files) but is inert. Bounding the mutated
+	// binaries via GOMAXPROCS was tried and reverted: the mutants
+	// that time out do so by hanging, not by thrashing, so the bound
+	// changed no verdict and cost wall-clock on every mutant that
+	// did terminate. Measured on go.thesmos.sh/core's clock layer:
+	// 111s unbounded, 182s at GOMAXPROCS=2, 3 timeouts either way.
 	args := []string{
 		"unleash",
 		"--timeout-coefficient", strconv.Itoa(cfg.TimeoutCoefficient),
@@ -449,11 +454,9 @@ func runGremlins(
 		args = append(args, "--exclude-files", excludeRegex)
 	}
 	args = append(args, relPath)
-	opts := xexec.Options{Dir: dir, Stdout: &buf, Stderr: &buf}
-	if cfg.TestCPU > 0 {
-		opts.Env = []string{"GOMAXPROCS=" + strconv.Itoa(cfg.TestCPU)}
-	}
-	err := runner.Run(ctx, opts, "gremlins", args...)
+	err := runner.Run(ctx,
+		xexec.Options{Dir: dir, Stdout: &buf, Stderr: &buf},
+		"gremlins", args...)
 	return buf.String(), err
 }
 
@@ -482,6 +485,32 @@ func parsePercent(out, prefix string) (float64, bool) {
 		found = true
 	}
 	return value, found
+}
+
+// effectiveScore recomputes test efficacy with timed-out mutants
+// returned to the denominator.
+//
+// gremlins reports efficacy as killed/(killed+lived) and drops
+// timed-out mutants from the calculation entirely, so a layer whose
+// mutants hang scores on only the handful that terminated: the more
+// the suite fails to constrain, the better it looks. A timed-out
+// mutant was not killed. The suite failed to detect it and merely
+// failed slowly rather than quickly, which is not a pass.
+//
+// Measured on go.thesmos.sh/core's clock layer: 32 killed, 0 lived,
+// 3 timed out reported 100.0% and passed a 99% threshold. The same
+// counts here yield 91.4%.
+//
+// Returns reported unchanged when nothing timed out, so the common
+// path preserves gremlins' own arithmetic and rounding rather than
+// re-deriving a value that should agree and might not.
+func effectiveScore(reported float64, c mutantCounts) float64 {
+	if c.TimedOut == 0 {
+		return reported
+	}
+	// A non-zero TimedOut guarantees a non-zero denominator, so no
+	// division guard is needed past this point.
+	return float64(c.Killed) / float64(c.Killed+c.Lived+c.TimedOut) * 100
 }
 
 // mutantCounts groups the four classifications the per-target

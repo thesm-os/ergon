@@ -237,20 +237,21 @@ checks:
     # exclusion comes from `checks.excludes` / `checks.skips`
     # above; gremlins' `--exclude-files` is computed at call time.
     #
-    # test_cpu bounds each mutated test binary's parallelism. It
-    # is sent as GOMAXPROCS in the gremlins subprocess environment,
-    # NOT as gremlins' own `--test-cpu` flag: gremlins renders that
-    # flag as a single argv element containing a space (`-cpu 2`),
-    # `go test` rejects it and exits non-zero before compiling, and
-    # gremlins reads the exit as a killed mutant — reporting every
-    # covered mutant KILLED regardless of what the suite asserts.
+    # test_cpu is INERT and reaches nothing. gremlins renders
+    # `--test-cpu N` into the per-mutant command as a single argv
+    # element containing a space (`-cpu 2`), which makes `go test`
+    # swallow the package pattern as the flag's value and exit 1
+    # without running anything; gremlins reads that exit as a
+    # killed mutant, reporting every covered mutant KILLED
+    # regardless of what the suite asserts. The key is retained
+    # because the config decoder is strict.
     #
-    # Leaving it at 0 lets mutated binaries inherit the host's core
-    # count, which makes concurrency-sensitive packages block
-    # rather than fail fast: each one burns the full
-    # timeout_coefficient budget and is scored as a timeout, and
-    # gremlins excludes timeouts from the efficacy denominator —
-    # raising the reported score while lowering real coverage.
+    # A timed-out mutant is counted as unkilled. gremlins drops
+    # timeouts from its own efficacy denominator, so a package
+    # whose mutants hang is graded only on the ones that
+    # terminated — scoring better the less its suite constrains.
+    # ergon returns them to the denominator, so a reported score
+    # may sit below the figure gremlins printed.
     #
     # If this gate ever runs implausibly fast or reports zero
     # LIVED tree-wide, suspect the invocation before believing

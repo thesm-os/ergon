@@ -28,18 +28,6 @@ type Options struct {
 	// pass a resolved absolute path.
 	Dir string
 
-	// Env carries additional `KEY=VALUE` pairs for the subprocess,
-	// appended to the caller's environment rather than replacing it.
-	// ergon's subprocesses need the inherited PATH, HOME, and Go
-	// toolchain variables to function at all, so a replacing
-	// semantic would break every tool invocation. A nil or empty
-	// value leaves the child's environment untouched.
-	//
-	// Later entries win: os/exec resolves duplicate keys by taking
-	// the last occurrence, so a pair here overrides the same key
-	// inherited from the parent.
-	Env []string
-
 	// Stdout receives the subprocess's standard output. A nil value
 	// discards.
 	Stdout io.Writer
@@ -87,19 +75,9 @@ type Command struct{}
 // Interactive overrides any explicit [Options.Stdout] /
 // [Options.Stderr] passed alongside it — the two paths are
 // mutually exclusive in practice.
-//
-// [Options.Env] pairs are appended to the caller's environment; an
-// empty Env leaves the child inheriting the parent's unchanged.
 func (Command) Run(ctx context.Context, opts Options, name string, args ...string) error {
 	c := exec.CommandContext(ctx, name, args...)
 	c.Dir = opts.Dir
-	if len(opts.Env) > 0 {
-		// Appended to os.Environ() rather than assigned bare:
-		// os/exec treats a non-nil Env as the complete environment,
-		// so assigning opts.Env alone would strip PATH and break
-		// the tool lookup of every subsequent call.
-		c.Env = append(os.Environ(), opts.Env...)
-	}
 	if opts.Interactive {
 		c.Stdin = os.Stdin
 		c.Stdout = os.Stdout

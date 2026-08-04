@@ -74,24 +74,25 @@ type GremlinsConfig struct {
 	// has headroom and back-to-back layer runs do not contend.
 	Workers int `yaml:"workers"`
 
-	// TestCPU bounds the parallelism of each mutated test binary,
-	// transmitted as GOMAXPROCS in the gremlins subprocess
-	// environment. Zero leaves the child inheriting the host's core
-	// count, which makes concurrency-sensitive packages — goroutine
-	// pools, timer fan-out — block rather than fail fast under
-	// mutation. Each blocked mutant then burns the full
-	// TimeoutCoefficient budget and is reported as a timeout rather
-	// than a survivor; gremlins excludes timeouts from the efficacy
-	// denominator, so the misclassification raises the reported
-	// score while lowering real coverage.
+	// TestCPU is INERT and reaches nothing.
 	//
-	// It is NOT sent as gremlins' own `--test-cpu`. gremlins renders
-	// that flag as a single argv element containing a space
+	// It cannot be sent as gremlins' own `--test-cpu`: gremlins
+	// renders that flag as a single argv element containing a space
 	// (`-cpu 2`), which makes `go test` swallow the package pattern
 	// as the flag's value and exit 1 without running anything;
 	// gremlins reads that exit as a killed mutant, forcing 100%
 	// efficacy for every covered mutant no matter how weak the
 	// suite. See the comment on runGremlins for the measurement.
+	//
+	// Routing it via GOMAXPROCS instead was tried and reverted —
+	// mutants that time out hang rather than thrash, so bounding
+	// parallelism changed no verdict and slowed every mutant that
+	// did terminate. Timed-out mutants are handled by the verdict
+	// arithmetic in renderTarget, not by invocation tuning.
+	//
+	// The field is kept because the config decoder is strict:
+	// deleting the key would turn every `.ergon.yaml` that sets
+	// `test_cpu` into a hard parse error. Setting it has no effect.
 	TestCPU int `yaml:"test_cpu"`
 
 	// TimeoutCoefficient is gremlins' `--timeout-coefficient`. The
