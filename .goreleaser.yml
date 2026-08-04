@@ -58,6 +58,9 @@ archives:
       - LICENSE
       - README*
       - completions/*
+      # docs/ ships so the README's relative links resolve inside
+      # the archive, not just on GitHub.
+      - docs/**/*
 
 source:
   enabled: true

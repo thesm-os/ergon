@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-eidos is under active development. Security fixes are issued against the
+ergon is under active development. Security fixes are issued against the
 latest tagged release.
 
 ## Reporting a vulnerability
