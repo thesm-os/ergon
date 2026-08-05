@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.thesmos.sh/ergon/internal/config"
+	"go.thesmos.sh/ergon/internal/runtmp"
 	"go.thesmos.sh/ergon/internal/version"
 )
 
@@ -84,11 +85,34 @@ func init() {
 	)
 }
 
+// runTmp is this invocation's private temp root, published through
+// TMPDIR by [runtmp.New]. `ergon clean` reads it so a sweep of
+// abandoned roots does not reclaim the one it is running inside.
+var runTmp string
+
 // Execute runs the ergon CLI. It wires SIGINT and SIGTERM to a
 // cancellation context, propagates that context to every subcommand
 // (so subprocesses they launch are cancelled on signal), and
 // returns the first error any command produced.
+//
+// The per-run temp root is established here rather than in a
+// PersistentPreRunE for two reasons: it must exist before any
+// command body runs, and [runtmp.New] calls os.Setenv, which races
+// concurrent os.Environ reads — the branch gate reads the
+// environment from a worker pool. Here there is provably no other
+// goroutine yet.
+//
+// The cleanup is deferred, so it covers a normal exit and the
+// SIGINT / SIGTERM path above. A SIGKILL still leaks the root;
+// `ergon clean` reclaims those.
 func Execute() error {
+	root, cleanup, err := runtmp.New()
+	if err != nil {
+		return err
+	}
+	runTmp = root
+	defer cleanup()
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return rootCmd.ExecuteContext(ctx)

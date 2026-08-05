@@ -4,12 +4,14 @@
 package cmds
 
 import (
+	"fmt"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
 
 	"go.thesmos.sh/ergon/internal/clean"
 	"go.thesmos.sh/ergon/internal/discover"
+	"go.thesmos.sh/ergon/internal/runtmp"
 )
 
 // cleanCmd is `ergon clean`. Removes the build and coverage
@@ -31,7 +33,25 @@ var cleanCmd = &cobra.Command{
 		if name == "" {
 			name = filepath.Base(root)
 		}
-		return clean.Run(cmd.OutOrStdout(), root, name)
+		if err := clean.Run(cmd.OutOrStdout(), root, name); err != nil {
+			return err
+		}
+		// Reclaim per-run temp roots abandoned by killed runs. The
+		// deferred cleanup in Execute covers a normal exit and
+		// SIGINT; a SIGKILL leaves the root behind, and on a machine
+		// that interrupts checks often they accumulate in a
+		// RAM-backed /tmp. runTmp is this invocation's own root and
+		// is excluded — clean runs inside one.
+		swept, sweepErr := runtmp.Sweep(filepath.Dir(runTmp), runTmp, runtmp.StaleAfter)
+		if sweepErr != nil {
+			return sweepErr
+		}
+		if swept > 0 {
+			fmt.Fprintf(cmd.OutOrStdout(),
+				"removed %d abandoned temp root(s) older than %s\n",
+				swept, runtmp.StaleAfter)
+		}
+		return nil
 	},
 }
 
