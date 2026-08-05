@@ -841,6 +841,41 @@ func TestRunGobcoAllPackagesRecordsSkipReason(t *testing.T) {
 	}
 }
 
+// TestSkipDetail pins the trimming applied to gobco's output.
+//
+// gobco fails by panicking, so its output is one useful line
+// followed by its own goroutine dump. Printed whole, per skipped
+// package, the line a reader needs is buried.
+func TestSkipDetail(t *testing.T) {
+	t.Parallel()
+
+	t.Run("caps a long message", func(t *testing.T) {
+		t.Parallel()
+		got := skipDetail("one\ntwo\nthree\nfour", "example.test/ws")
+		if len(got) != maxSkipDetailLines {
+			t.Errorf("got %d lines (%v), want %d", len(got), got, maxSkipDetailLines)
+		}
+	})
+
+	t.Run("falls back when the message is only a stack dump", func(t *testing.T) {
+		t.Parallel()
+		// Nothing survives the goroutine cut, so the dependency is
+		// all that remains to report.
+		got := skipDetail("goroutine 1 [running]:\nmain.ok(...)", "example.test/ws/alpha")
+		if len(got) != 1 || !strings.Contains(got[0], "example.test/ws/alpha") {
+			t.Errorf("got %v, want the dependency named", got)
+		}
+	})
+
+	t.Run("falls back when there is no message at all", func(t *testing.T) {
+		t.Parallel()
+		got := skipDetail("   \n\n", "example.test/ws/alpha")
+		if len(got) != 1 || !strings.Contains(got[0], "example.test/ws/alpha") {
+			t.Errorf("got %v, want the dependency named", got)
+		}
+	})
+}
+
 // TestWriteSkipNotice pins the reporting. A skipped package
 // contributes no conditions, so the set has to be stated
 // explicitly — otherwise a layer whose packages were all skipped

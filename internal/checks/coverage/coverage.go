@@ -656,6 +656,38 @@ func findProfiles(dir string) ([]string, error) {
 	return out, nil
 }
 
+// writeMergedProfile writes body to w in one call and reports any
+// shortfall.
+//
+// The merge previously wrote line by line with fmt.Fprintln and
+// discarded both return values. A write that stopped partway — a
+// filesystem out of space returns the bytes it managed before
+// failing — silently lost the tail of one record, and the next
+// line's bytes landed directly against it, producing one malformed
+// record spanning two modules:
+//
+//	...ttl.go:72.2,72.12 go.thesmos.sh/testkit/core/trace
+//
+// `go tool cover` rejected that as a malformed import path, which
+// was the fortunate outcome: a truncation that still parsed would
+// have produced a quietly wrong percentage instead.
+//
+// n is checked alongside err because [io.Writer] permits a short
+// write with a nil error. [os.File] converts that case to
+// [io.ErrShortWrite] itself, but checking here keeps the guarantee
+// independent of which writer is handed in.
+func writeMergedProfile(w io.Writer, body string) error {
+	n, err := io.WriteString(w, body)
+	if err != nil {
+		return fmt.Errorf("coverage: write merged profile: %w", err)
+	}
+	if n != len(body) {
+		return fmt.Errorf("coverage: write merged profile: %w: %d of %d bytes",
+			io.ErrShortWrite, n, len(body))
+	}
+	return nil
+}
+
 // mergeProfiles concatenates every input profile into a single
 // temp file. Returns the path, the merged body (used for verbose
 // mode's uncovered-range dump), and a cleanup function.
@@ -679,7 +711,6 @@ func mergeProfiles(paths []string) (string, string, func(), error) {
 		for line := range strings.SplitSeq(string(raw), "\n") {
 			if strings.HasPrefix(line, "mode:") {
 				if !modeWritten {
-					fmt.Fprintln(f, line)
 					body.WriteString(line + "\n")
 					modeWritten = true
 				}
@@ -688,11 +719,30 @@ func mergeProfiles(paths []string) (string, string, func(), error) {
 			if line == "" {
 				continue
 			}
-			fmt.Fprintln(f, line)
 			body.WriteString(line + "\n")
 		}
 	}
-	return f.Name(), body.String(), cleanup, nil
+
+	// The file is written from body rather than accumulated
+	// alongside it: the bytes `go tool cover` parses and the string
+	// [aggregateByLayer] walks are then the same data by
+	// construction. Maintained in parallel, a failed file write left
+	// the two disagreeing, and the layer percentages were computed
+	// from records the tool never saw.
+	merged := body.String()
+	if err := writeMergedProfile(f, merged); err != nil {
+		cleanup()
+		return "", "", func() {}, err
+	}
+	// Closed before the path is handed on. Some filesystems report a
+	// deferred write failure only at close, and `go tool cover` has
+	// no use for an open descriptor.
+	if err := f.Close(); err != nil {
+		_ = os.Remove(f.Name())
+		return "", "", func() {}, fmt.Errorf("coverage: close merged profile: %w", err)
+	}
+	name := f.Name()
+	return name, merged, func() { _ = os.Remove(name) }, nil
 }
 
 // captureFuncCoverage runs `go tool cover -func <profile>` and

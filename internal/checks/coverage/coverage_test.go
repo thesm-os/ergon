@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -838,6 +839,145 @@ func TestFindProfiles(t *testing.T) {
 			t.Errorf("profiles = %v, want them sorted by name", got)
 		}
 	})
+}
+
+// shortWriter accepts limit bytes and then reports the write as
+// short, which is what a filesystem does when it runs out of space
+// partway through a write(2).
+type shortWriter struct {
+	limit int
+	got   []byte
+	err   error
+
+	// quiet reports a short write with a nil error, which
+	// [io.Writer] permits and os.File does not do. The count check
+	// exists for writers that behave this way, so it needs a writer
+	// that behaves this way to be exercised at all.
+	quiet bool
+}
+
+func (s *shortWriter) Write(p []byte) (int, error) {
+	if s.err != nil {
+		return 0, s.err
+	}
+	n := min(len(p), s.limit)
+	s.got = append(s.got, p[:n]...)
+	if n != len(p) && !s.quiet {
+		// os.File.Write converts a partial write into this error;
+		// mirroring it keeps the fake honest to the real seam.
+		return n, io.ErrShortWrite
+	}
+	return n, nil
+}
+
+// TestWriteMergedProfile pins the contract that stops a truncated
+// merge from reaching `go tool cover` as data.
+//
+// The merge used to call fmt.Fprintln per line and discard both
+// return values. A write that stopped partway therefore lost the
+// tail of one record, and the next line's bytes landed against it
+// — producing a single malformed record spanning two modules:
+//
+//	...ttl.go:72.2,72.12 go.thesmos.sh/testkit/core/trace
+//
+// go tool cover rejected that as a malformed import path, which was
+// the good case. A truncation that still parsed would have yielded
+// a silently wrong percentage instead.
+func TestWriteMergedProfile(t *testing.T) {
+	t.Parallel()
+
+	const body = "mode: atomic\nx.go:1.1,2.2 1 1\ny.go:1.1,2.2 1 0\n"
+
+	t.Run("a short write is an error, not a truncation", func(t *testing.T) {
+		t.Parallel()
+		w := &shortWriter{limit: 20}
+		err := writeMergedProfile(w, body)
+		if err == nil {
+			t.Fatal("writeMergedProfile = nil, want the short write reported")
+		}
+		if len(w.got) >= len(body) {
+			t.Fatalf("wrote %d bytes, want the fake to have truncated", len(w.got))
+		}
+	})
+
+	t.Run("a failing write propagates", func(t *testing.T) {
+		t.Parallel()
+		err := writeMergedProfile(&shortWriter{err: errors.New("no space left on device")}, body)
+		if err == nil {
+			t.Fatal("writeMergedProfile = nil, want the failure surfaced")
+		}
+		if !strings.Contains(err.Error(), "no space left") {
+			t.Errorf("err = %v, want the underlying cause named", err)
+		}
+	})
+
+	t.Run("a silent short write is caught by the count", func(t *testing.T) {
+		t.Parallel()
+		// io.Writer allows (n < len(p), nil). Nothing would report
+		// the shortfall if the count were not checked alongside the
+		// error, and the merged profile would be truncated exactly
+		// as it was before.
+		err := writeMergedProfile(&shortWriter{limit: 20, quiet: true}, body)
+		if err == nil {
+			t.Fatal("writeMergedProfile = nil, want the shortfall caught by the byte count")
+		}
+		if !strings.Contains(err.Error(), "of "+strconv.Itoa(len(body))+" bytes") {
+			t.Errorf("err = %v, want it to report how much was written", err)
+		}
+	})
+
+	t.Run("a complete write succeeds and writes every byte", func(t *testing.T) {
+		t.Parallel()
+		w := &shortWriter{limit: len(body)}
+		if err := writeMergedProfile(w, body); err != nil {
+			t.Fatalf("writeMergedProfile: %v", err)
+		}
+		if string(w.got) != body {
+			t.Errorf("wrote %q, want %q", w.got, body)
+		}
+	})
+}
+
+// TestMergeProfilesFileMatchesBody pins the invariant the caller
+// depends on: the bytes handed to `go tool cover` and the string
+// handed to aggregateByLayer are the same data.
+//
+// They used to be maintained in parallel — one Fprintln to the
+// file, one WriteString to a strings.Builder that cannot fail. A
+// failed file write left the two disagreeing, so the layer
+// percentages were computed from records the tool never saw.
+func TestMergeProfilesFileMatchesBody(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.out")
+	b := filepath.Join(dir, "b.out")
+	if err := os.WriteFile(a, []byte("mode: atomic\nx.go:1.1,2.2 1 1\n\n"), 0o600); err != nil {
+		t.Fatalf("write a: %v", err)
+	}
+	if err := os.WriteFile(b, []byte("mode: atomic\ny.go:1.1,2.2 1 0\n"), 0o600); err != nil {
+		t.Fatalf("write b: %v", err)
+	}
+
+	path, body, cleanup, err := mergeProfiles([]string{a, b})
+	if err != nil {
+		t.Fatalf("mergeProfiles: %v", err)
+	}
+	defer cleanup()
+
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read merged: %v", err)
+	}
+	if string(onDisk) != body {
+		t.Errorf("file = %q, body = %q, want identical", onDisk, body)
+	}
+	// Every record must end in a newline; the reported corruption
+	// was two records sharing a line.
+	for line := range strings.SplitSeq(strings.TrimSuffix(string(onDisk), "\n"), "\n") {
+		if strings.Count(line, ".go:") > 1 {
+			t.Errorf("line = %q, want at most one record per line", line)
+		}
+	}
 }
 
 // TestMergeProfiles covers the concatenation: exactly one `mode:`
