@@ -68,8 +68,16 @@ lint:
   # error-prefix — `ergon lint error-prefix`
   error_prefix:
     # Directories (repository-relative) the walker recurses into.
-    # `[.]` covers the entire tree.
+    # `[.]` covers the entire tree. Entries are inclusive prefixes,
+    # so this list cannot express "everywhere except here".
     target_dirs: ["."]
+    # Paths the rule must not apply to — same {path, reason} shape
+    # as checks.excludes, and the same glob syntax (`...` matches
+    # any number of segments). Differs from target_dirs above:
+    # `foo` matches that path alone, `foo/...` the tree beneath it.
+    # The count of exempted files prints on every run, so an
+    # exclusion cannot quietly grow.
+    excludes: []
 
 # markdown — markdownlint-cli2 invocation shared by `ergon fmt`
 # (auto-fix mode) and `ergon lint md` (reporting only)

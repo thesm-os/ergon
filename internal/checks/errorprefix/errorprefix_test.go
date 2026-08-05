@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.thesmos.sh/ergon/internal/checks/policy"
 )
 
 // TestIsErrorsNew pins the syntactic detection: only the exact
@@ -87,6 +89,16 @@ func TestStringLiteral(t *testing.T) {
 			t.Fatal("ok=true, want false for malformed quoted literal")
 		}
 	})
+}
+
+// TestWithDefaultsExcludes pins that an empty Excludes list is a
+// legitimate configuration rather than a missing one — the default
+// is to exempt nothing.
+func TestWithDefaultsExcludes(t *testing.T) {
+	t.Parallel()
+	if got := withDefaults(Config{}).Excludes; len(got) != 0 {
+		t.Errorf("Excludes = %+v, want empty by default", got)
+	}
 }
 
 // TestWithDefaults pins the merge: zero-value TargetDirs inherits
@@ -180,6 +192,106 @@ func TestRun(t *testing.T) {
 		cfg := Config{TargetDirs: []string{"foundation"}}
 		if err := Run(io.Discard, io.Discard, root, files, cfg); err != nil {
 			t.Fatalf("Run err: %v, want cmd/ to be ignored", err)
+		}
+	})
+}
+
+// TestRunExcludes covers the exemption a fixture corpus needs.
+//
+// A generator's corpus deliberately holds the patterns the
+// generator exists to reject — testkit's sentinel generator
+// supports `prefix=off`, and proving that branch works needs a
+// fixture whose sentinels genuinely lack the prefix. Without an
+// exclusion the repository's own lint forces that fixture to be
+// prefixed, at which point a generator ignoring `prefix=off`
+// entirely would still produce a passing suite.
+//
+// TargetDirs cannot express it: a repo with root-level .go files
+// can only reach them with `.`, which reaches the corpus too.
+func TestRunExcludes(t *testing.T) {
+	t.Parallel()
+
+	corpus := map[string]string{
+		"assert.go": "package testkit\n\nimport \"errors\"\n\n" +
+			"var ErrFail = errors.New(\"testkit: assertion failed\")\n",
+		"conformance/corpus/errors/noprefix/iface.go": "package noprefix\n\nimport \"errors\"\n\n" +
+			"var ErrRetry = errors.New(\"retry the operation\")\n",
+	}
+
+	t.Run("without an exclude the corpus is a violation", func(t *testing.T) {
+		t.Parallel()
+		root, files := buildFiles(t, corpus)
+		if err := Run(io.Discard, io.Discard, root, files, Defaults()); err == nil {
+			t.Fatal("Run returned nil; the fixture must violate, or the test proves nothing")
+		}
+	})
+
+	t.Run("an excluded path is exempt and counted", func(t *testing.T) {
+		t.Parallel()
+		root, files := buildFiles(t, corpus)
+		cfg := Config{
+			TargetDirs: []string{"."},
+			Excludes: []policy.Exclude{{
+				Path:   "conformance/corpus/...",
+				Reason: "generator fixture corpus; violating patterns are the point",
+			}},
+		}
+
+		var stdout bytes.Buffer
+		if err := Run(&stdout, io.Discard, root, files, cfg); err != nil {
+			t.Fatalf("Run err: %v, want the corpus exempt", err)
+		}
+		// The count is the whole difference between this and
+		// checks.excludes, whose Reason surfaces nowhere: an
+		// exemption nobody can see is how a lint quietly shrinks.
+		if got := stdout.String(); !strings.Contains(got, "1 file(s) excluded") {
+			t.Errorf("stdout = %q, want the exempted count reported", got)
+		}
+	})
+
+	t.Run("the glob matches segments, not just a literal prefix", func(t *testing.T) {
+		t.Parallel()
+		root, files := buildFiles(t, corpus)
+		// A bare directory path is a literal under the schema's
+		// glob syntax and must NOT sweep the tree beneath it — the
+		// same rule checks.excludes follows.
+		cfg := Config{Excludes: []policy.Exclude{{Path: "conformance/corpus"}}}
+		if err := Run(io.Discard, io.Discard, root, files, cfg); err == nil {
+			t.Fatal("Run returned nil; a bare directory must not match files beneath it")
+		}
+	})
+
+	t.Run("a file outside TargetDirs is not counted as excluded", func(t *testing.T) {
+		t.Parallel()
+		root, files := buildFiles(t, corpus)
+		// Out of scope and exempt are different states. Counting
+		// the former inflates the figure that exists to make
+		// exemptions reviewable.
+		cfg := Config{
+			TargetDirs: []string{"conformance"},
+			Excludes:   []policy.Exclude{{Path: "conformance/corpus/..."}},
+		}
+		var stdout bytes.Buffer
+		if err := Run(&stdout, io.Discard, root, files, cfg); err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		if got := stdout.String(); !strings.Contains(got, "1 file(s) excluded") {
+			t.Errorf("stdout = %q, want only the in-scope exemption counted", got)
+		}
+	})
+
+	t.Run("no excludes reports no exclusion clause", func(t *testing.T) {
+		t.Parallel()
+		root, files := buildFiles(t, map[string]string{
+			"pkg/clock.go": "package clock\n\nimport \"errors\"\n\n" +
+				"var ErrZero = errors.New(\"clock: zero\")\n",
+		})
+		var stdout bytes.Buffer
+		if err := Run(&stdout, io.Discard, root, files, Defaults()); err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		if strings.Contains(stdout.String(), "excluded") {
+			t.Errorf("stdout = %q, want no exclusion clause when nothing was excluded", stdout.String())
 		}
 	})
 }

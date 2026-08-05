@@ -30,13 +30,20 @@ import (
 func Run(stdout, stderr io.Writer, root string, files []string, cfg Config) error {
 	cfg = withDefaults(cfg)
 	var violations []finding
-	var scanned int
+	var scanned, exempted int
 
 	for _, rel := range files {
 		if !strings.HasSuffix(rel, ".go") || strings.HasSuffix(rel, "_test.go") {
 			continue
 		}
 		if !underTargets(rel, cfg.TargetDirs) {
+			continue
+		}
+		// Counted only for files that were in scope, so the figure
+		// reports what the exemption actually bought rather than
+		// every file the targets already omitted.
+		if excluded(rel, cfg) {
+			exempted++
 			continue
 		}
 		body, err := os.ReadFile(filepath.Join(root, rel))
@@ -58,10 +65,18 @@ func Run(stdout, stderr io.Writer, root string, files []string, cfg Config) erro
 		}
 		return fmt.Errorf("errorprefix: %d errors.New call(s) with wrong package prefix", len(violations))
 	}
+	// The exemption is reported, never merely applied. An
+	// exclusion nobody can see is how a lint quietly shrinks until
+	// it covers nothing — `checks.excludes` carries a Reason field
+	// that surfaces nowhere, and this list does not repeat that.
+	suffix := ""
+	if exempted > 0 {
+		suffix = fmt.Sprintf(", %d file(s) excluded", exempted)
+	}
 	if scanned == 0 {
-		fmt.Fprintln(stdout, "no errors.New calls found")
+		fmt.Fprintf(stdout, "no errors.New calls found%s\n", suffix)
 	} else {
-		fmt.Fprintf(stdout, "%d errors.New call(s) scanned, 0 violations\n", scanned)
+		fmt.Fprintf(stdout, "%d errors.New call(s) scanned, 0 violations%s\n", scanned, suffix)
 	}
 	return nil
 }
