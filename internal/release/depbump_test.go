@@ -252,8 +252,11 @@ func TestCommitPaths(t *testing.T) {
 		if !slices.Equal(addArgs, wantAdd) {
 			t.Errorf("add args = %+v, want %+v", addArgs, wantAdd)
 		}
+		// --no-verify: the pipeline's own commits bypass development
+		// hooks, whose workspace-wide tidy invariant cannot hold at an
+		// interior layer. See the Hooks section on commitPaths.
 		commitArgs := runner.calls[1].args
-		wantCommit := []string{"commit", "-m", "chore(release): test"}
+		wantCommit := []string{"commit", "--no-verify", "-m", "chore(release): test"}
 		if !slices.Equal(commitArgs, wantCommit) {
 			t.Errorf("commit args = %+v, want %+v", commitArgs, wantCommit)
 		}

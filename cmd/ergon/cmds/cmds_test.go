@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"go.thesmos.sh/ergon/internal/checks/commitmsg"
 	"go.thesmos.sh/ergon/internal/checks/coverage"
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/release"
@@ -601,4 +602,47 @@ func acceptsArgs(c *cobra.Command) bool {
 		return !c.HasSubCommands()
 	}
 	return c.Args(c, []string{"probe"}) == nil
+}
+
+// TestReleasePreflight pins the convention gate that replaces the
+// commit-msg hook for pipeline commits: the pipeline commits with
+// --no-verify, so a repository whose checks.commit_msg excludes
+// `chore` must be refused before any layer runs — loudly at entry
+// instead of silently violated in history.
+func TestReleasePreflight(t *testing.T) {
+	t.Parallel()
+
+	hostile := commitmsg.Defaults()
+	hostile.Types = []string{"feat", "fix"}
+
+	t.Run("default config accepts the generated message", func(t *testing.T) {
+		t.Parallel()
+		if err := releasePreflight(release.Options{Message: "x"}, commitmsg.Defaults()); err != nil {
+			t.Errorf("releasePreflight(defaults) = %v, want nil", err)
+		}
+	})
+
+	t.Run("a type set excluding chore is rejected at entry", func(t *testing.T) {
+		t.Parallel()
+		err := releasePreflight(release.Options{Message: "x"}, hostile)
+		if err == nil {
+			t.Fatal("releasePreflight = nil, want the convention refusal")
+		}
+		if !strings.Contains(err.Error(), "checks.commit_msg") {
+			t.Errorf("err = %v, want it to name checks.commit_msg", err)
+		}
+	})
+
+	t.Run("modes that create no pin commit skip the check", func(t *testing.T) {
+		t.Parallel()
+		for _, opts := range []release.Options{
+			{Message: "x", DryRun: true},
+			{Message: "x", NoTag: true},
+			{Message: "x", NoBump: true},
+		} {
+			if err := releasePreflight(opts, hostile); err != nil {
+				t.Errorf("releasePreflight(%+v) = %v, want nil — no pin commit is generated", opts, err)
+			}
+		}
+	})
 }

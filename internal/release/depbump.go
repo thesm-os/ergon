@@ -72,13 +72,36 @@ func ApplyPipeline(
 
 	// Pin every non-skipped entry's new version so later layers
 	// can rewrite their require lines against a stable map.
+	//
+	// Skipped entries seed the map too, at the version they are
+	// already released at. A module is skipped because its content
+	// is already tagged — either a prior run released it, or it had
+	// no commits in scope — so a dependent released in this run
+	// must pin that tag rather than whatever older version its
+	// go.mod happens to carry. Omitting them made a resumed release
+	// write incomplete rewrites: eidos's frontend/* tags pin
+	// eidos v1.3.0 although v1.3.1 had been tagged minutes earlier
+	// by the run that died. MVS resolves it, but the tagged go.mod
+	// misreports what the module was built against.
+	//
+	// toTag counts only the entries that will produce a tag: the
+	// map is no longer a proxy for "is there anything to do", since
+	// an all-skipped plan now populates it.
 	versions := map[string]string{}
+	toTag := 0
 	for _, e := range plan {
 		if !e.Skipped() {
 			versions[e.Module.Dir] = e.NewVersion
+			toTag++
+			continue
+		}
+		// initialVersion means the module has never been tagged, so
+		// there is no released version for a dependent to pin to.
+		if e.OldVersion != "" && e.OldVersion != initialVersion {
+			versions[e.Module.Dir] = e.OldVersion
 		}
 	}
-	if len(versions) == 0 {
+	if toTag == 0 {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "(nothing to tag)")
 		return nil
@@ -136,12 +159,9 @@ func ApplyPipeline(
 					return err
 				}
 			}
-			msg := fmt.Sprintf(
-				"chore(release): pin intra-workspace deps for %s",
-				strings.Join(tagNames(ready, plan), ", "),
-			)
+			msg := PinCommitMessage(tagNames(ready, plan))
 			if err := commitPaths(ctx, runner, root, bumpedPaths(root, bumped), msg); err != nil {
-				return err
+				return layerFailure(ready, plan, "commit", err)
 			}
 			fmt.Fprintf(w, "  bumped go.mod in %d module(s)\n", len(bumped))
 		}
@@ -165,7 +185,7 @@ func ApplyPipeline(
 		// these tags through the proxy or direct git fetch.
 		if !opts.NoPush {
 			if err := pushFollowTags(ctx, runner, root); err != nil {
-				return err
+				return layerFailure(ready, plan, "push", err)
 			}
 		}
 	}
@@ -194,11 +214,14 @@ func ApplyPipeline(
 // plus every annotated tag reachable from those commits. Used at
 // the end of each layer so the just-created tags become resolvable
 // for the next layer's `go mod tidy`.
+//
+// --no-verify for the reason given on [commitPaths]: a pre-push
+// hook running the workspace-wide gate cannot pass mid-pipeline.
 func pushFollowTags(ctx context.Context, runner xexec.Runner, root string) error {
 	var buf bytes.Buffer
 	err := runner.Run(ctx,
 		xexec.Options{Dir: root, Stdout: &buf, Stderr: &buf},
-		"git", "push", "--follow-tags")
+		"git", "push", "--no-verify", "--follow-tags")
 	if err != nil {
 		return fmt.Errorf("git push: %w: %s", err, strings.TrimSpace(buf.String()))
 	}
@@ -392,6 +415,24 @@ func bumpOwnRequires(
 // terminal inherited because `commit.gpgsign=true` makes git
 // invoke ssh-keygen / gpg, which needs a TTY for passphrase or
 // hardware-key touch prompts.
+//
+// # Hooks
+//
+// The commit carries --no-verify. Development hooks assert a
+// workspace-wide invariant — every module tidy against published
+// versions — that holds only at the pipeline's entry and exit.
+// Between the first layer's commit and the last, some dependent
+// always pins a sibling older than the content its imports were
+// built against, because `go mod tidy` resolves siblings through
+// the proxy and ignores `go.work` entirely. A gate asserting that
+// invariant at an interior commit fails by construction, and it
+// deadlocked the eidos v1.3.1 release. The invariant is checked
+// where it holds: the pipeline refuses to start on a dirty tree,
+// and `ergon check` runs before the release.
+//
+// The one guarantee lost is the commit-msg hook's convention
+// check; [PinCommitMessage] is validated against the repository's
+// own `checks.commit_msg` policy at entry instead.
 func commitPaths(ctx context.Context, runner xexec.Runner, root string, paths []string, msg string) error {
 	if len(paths) == 0 {
 		return nil
@@ -403,7 +444,7 @@ func commitPaths(ctx context.Context, runner xexec.Runner, root string, paths []
 		"git", args...); err != nil {
 		return fmt.Errorf("git add: %w: %s", err, strings.TrimSpace(buf.String()))
 	}
-	return runGitInteractive(ctx, runner, root, "commit", "-m", msg)
+	return runGitInteractive(ctx, runner, root, "commit", "--no-verify", "-m", msg)
 }
 
 // bumpedPaths returns the go.mod + go.sum paths (relative to
@@ -444,6 +485,53 @@ func planEntry(plan []PlanEntry, dir string) PlanEntry {
 		}
 	}
 	panic("planEntry: unknown dir " + dir)
+}
+
+// pinCommitSubject is the constant subject of every pin commit.
+//
+// Constant, and not "... for <tags>", because the tag list is
+// unbounded: a ten-module layer produced a subject far past the
+// 72-byte default `checks.commit_msg.max_subject_length`, and the
+// repository's own commit-msg hook then rejected the pipeline's
+// commit. The tags moved to the body, where each occupies its own
+// short line.
+const pinCommitSubject = "chore(release): pin intra-workspace deps"
+
+// PinCommitMessage renders the commit message for one layer's
+// go.mod rewrite. The subject is constant; the layer's tags are
+// listed in the body, one per line.
+//
+// Exported so the cobra layer can validate the generated message
+// against the repository's `checks.commit_msg` policy before the
+// release starts — the pipeline commits with --no-verify, so a
+// policy that rejects `chore` has to fail at entry rather than
+// land a non-conforming commit silently.
+func PinCommitMessage(tags []string) string {
+	var b strings.Builder
+	b.WriteString(pinCommitSubject)
+	b.WriteString("\n\nPins every intra-workspace require in this layer to the\n")
+	b.WriteString("versions tagged by the preceding layers.\n\nTags in this layer:\n")
+	for _, t := range tags {
+		b.WriteString("  - ")
+		b.WriteString(t)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// layerFailure wraps a mid-pipeline git error with the identity of
+// the layer in flight, the step that failed, and the resume path.
+//
+// A release that dies partway leaves tags on disk and on the
+// remote; the bare `exit status 1` the pipeline used to return
+// forced the operator to reconstruct which layer was in flight
+// from tag timestamps. EnsureTag is idempotent, so re-running is
+// the correct recovery and the message says so.
+func layerFailure(ready []string, plan []PlanEntry, step string, err error) error {
+	return fmt.Errorf(
+		"release: git %s failed while releasing %s: %w\n"+
+			"  tags already created are preserved; re-run `ergon release` to resume",
+		step, strings.Join(tagNames(ready, plan), ", "), err)
 }
 
 // tagNames returns the tag-name list for the ready modules so the

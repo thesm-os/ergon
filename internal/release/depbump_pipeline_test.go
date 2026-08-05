@@ -5,14 +5,262 @@ package release
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"go.thesmos.sh/ergon/internal/checks/commitmsg"
 	"go.thesmos.sh/ergon/internal/modules"
 )
+
+// TestPipelineGitOpsBypassHooks pins the hook boundary: the
+// pipeline's own commits and pushes carry --no-verify. Development
+// hooks assert workspace-wide invariants (every module tidy) that
+// are only true at the pipeline's entry and exit — mid-release, a
+// dependent module legitimately pins a sibling version older than
+// its imports were built against, so a commit-time gate fails by
+// construction. The gate runs where its invariant holds: before
+// the release starts.
+func TestPipelineGitOpsBypassHooks(t *testing.T) {
+	t.Parallel()
+	root, mods, plan := twoModuleRepo(t)
+	runner := &gitFakeRunner{}
+
+	if err := ApplyPipeline(t.Context(), runner, root, io.Discard, mods, plan,
+		Options{AllowDirty: true, Message: "release"}); err != nil {
+		t.Fatalf("ApplyPipeline err: %v", err)
+	}
+
+	commits, pushes := 0, 0
+	for _, c := range runner.calls {
+		if c.name != "git" || len(c.args) == 0 {
+			continue
+		}
+		switch c.args[0] {
+		case "commit":
+			commits++
+			if !slices.Contains(c.args, "--no-verify") {
+				t.Errorf("commit args = %v, want --no-verify", c.args)
+			}
+			// The message reaches git as the argument after -m: a
+			// constant subject with the tag list in the body, so
+			// multi-tag layers cannot overflow max_subject_length.
+			mi := slices.Index(c.args, "-m")
+			if mi < 0 || mi+1 >= len(c.args) {
+				t.Fatalf("commit args = %v, want -m <msg>", c.args)
+			}
+			msg := c.args[mi+1]
+			if first, _, _ := strings.Cut(msg, "\n"); first != "chore(release): pin intra-workspace deps" {
+				t.Errorf("commit subject = %q, want the constant subject", first)
+			}
+			if !strings.Contains(msg, "\n  - sub/v0.1.1") {
+				t.Errorf("commit msg = %q, want the layer's tag in the body", msg)
+			}
+		case "push":
+			pushes++
+			if !slices.Contains(c.args, "--no-verify") {
+				t.Errorf("push args = %v, want --no-verify", c.args)
+			}
+		}
+	}
+	if commits == 0 || pushes == 0 {
+		// A zero count would make every assertion above vacuous.
+		t.Fatalf("commits=%d pushes=%d, want both exercised", commits, pushes)
+	}
+}
+
+// TestPinCommitMessage pins the rendered shape and its conformance
+// to ergon's own default commit-message gate. The eidos incident:
+// the old format put the tag list in the subject, so a five-tag
+// layer overflowed max_subject_length and the repository's
+// commit-msg hook rejected the pipeline's own commit.
+func TestPinCommitMessage(t *testing.T) {
+	t.Parallel()
+
+	msg := PinCommitMessage([]string{"bridge/protogo/v1.3.1", "cmd/eidos-reference/v1.3.1"})
+	first, rest, _ := strings.Cut(msg, "\n")
+	if first != "chore(release): pin intra-workspace deps" {
+		t.Errorf("subject = %q, want the constant subject", first)
+	}
+	if !strings.HasPrefix(rest, "\n") {
+		t.Errorf("msg = %q, want a blank line after the subject", msg)
+	}
+	for _, tag := range []string{"bridge/protogo/v1.3.1", "cmd/eidos-reference/v1.3.1"} {
+		if !strings.Contains(msg, "\n  - "+tag) {
+			t.Errorf("msg = %q, want %q listed in the body", msg, tag)
+		}
+	}
+	if err := commitmsg.Validate(msg, commitmsg.Defaults()); err != nil {
+		t.Errorf("Validate(two tags) = %v, want nil", err)
+	}
+
+	// A wide layer must stay valid: the subject is constant and
+	// each body line holds one short tag.
+	many := make([]string, 40)
+	for i := range many {
+		many[i] = fmt.Sprintf("module%02d/v1.2.3", i)
+	}
+	if err := commitmsg.Validate(PinCommitMessage(many), commitmsg.Defaults()); err != nil {
+		t.Errorf("Validate(40 tags) = %v, want nil", err)
+	}
+}
+
+// TestApplyPipelineFailureNamesLayer pins the diagnostic contract
+// for mid-pipeline git failures: the error names the layer in
+// flight, the failing step, and the resume path. The eidos
+// incident died with a bare `exit status 1` — the layer had to be
+// reconstructed from tag timestamps.
+func TestApplyPipelineFailureNamesLayer(t *testing.T) {
+	t.Parallel()
+
+	t.Run("commit failure names the layer and step", func(t *testing.T) {
+		t.Parallel()
+		root, mods, plan := twoModuleRepo(t)
+		runner := &gitFakeRunner{decide: func(_ string, args []string) error {
+			if len(args) > 0 && args[0] == "commit" {
+				return errors.New("exit status 1")
+			}
+			return nil
+		}}
+
+		err := ApplyPipeline(t.Context(), runner, root, io.Discard, mods, plan,
+			Options{AllowDirty: true, Message: "release"})
+		if err == nil {
+			t.Fatal("ApplyPipeline returned nil, want the commit failure")
+		}
+		for _, want := range []string{"sub/v0.1.1", "commit", "re-run"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("err = %v, want it to carry %q", err, want)
+			}
+		}
+	})
+
+	t.Run("push failure names the layer and step", func(t *testing.T) {
+		t.Parallel()
+		root, mods, plan := twoModuleRepo(t)
+		runner := &gitFakeRunner{decide: func(_ string, args []string) error {
+			if len(args) > 0 && args[0] == "push" {
+				return errors.New("exit status 1")
+			}
+			return nil
+		}}
+
+		err := ApplyPipeline(t.Context(), runner, root, io.Discard, mods, plan,
+			Options{AllowDirty: true, Message: "release"})
+		if err == nil {
+			t.Fatal("ApplyPipeline returned nil, want the push failure")
+		}
+		// The first push closes the root layer, so the error names
+		// the root's tag.
+		for _, want := range []string{"v0.2.0", "push", "re-run"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("err = %v, want it to carry %q", err, want)
+			}
+		}
+	})
+}
+
+// TestApplyPipelineSkippedModulePinsDependents pins the resume
+// path: a module skipped because it is already tagged (a prior
+// run released it, or it simply had no commits) still seeds the
+// version map, so dependents released in this run pin the version
+// whose content the workspace actually builds against. Without
+// this, a resumed release leaves stale sibling pins in the tags it
+// creates — eidos's frontend/* tags pin eidos v1.3.0 although
+// v1.3.1 was tagged minutes earlier by the run that died.
+func TestApplyPipelineSkippedModulePinsDependents(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an already-tagged skipped module pins its dependents", func(t *testing.T) {
+		t.Parallel()
+		root, mods, plan := twoModuleRepo(t)
+		plan[0] = PlanEntry{
+			Module:     modules.Module{Dir: "."},
+			OldVersion: "0.2.0",
+			NewVersion: "0.2.0",
+			Level:      BumpNone,
+			Reason:     "no commits in module scope",
+		}
+		runner := &gitFakeRunner{}
+
+		if err := ApplyPipeline(t.Context(), runner, root, io.Discard, mods, plan,
+			Options{AllowDirty: true, Message: "release"}); err != nil {
+			t.Fatalf("ApplyPipeline err: %v", err)
+		}
+
+		body, err := os.ReadFile(filepath.Join(root, "sub", "go.mod"))
+		if err != nil {
+			t.Fatalf("read sub/go.mod: %v", err)
+		}
+		if !strings.Contains(string(body), "example.test/proj v0.2.0") {
+			t.Errorf("sub/go.mod = %q, want the require pinned to the skipped module's released v0.2.0", body)
+		}
+		if got := tagNamesFrom(runner); !slices.Equal(got, []string{"sub/v0.1.1"}) {
+			t.Errorf("tags = %v, want only the dependent's — skipped modules are never re-tagged", got)
+		}
+	})
+
+	t.Run("a never-tagged skipped module pins nothing", func(t *testing.T) {
+		t.Parallel()
+		root, mods, plan := twoModuleRepo(t)
+		plan[0] = PlanEntry{
+			Module:     modules.Module{Dir: "."},
+			OldVersion: initialVersion,
+			NewVersion: initialVersion,
+			Level:      BumpNone,
+			Reason:     "no commits in module scope",
+		}
+		runner := &gitFakeRunner{}
+
+		if err := ApplyPipeline(t.Context(), runner, root, io.Discard, mods, plan,
+			Options{AllowDirty: true, Message: "release"}); err != nil {
+			t.Fatalf("ApplyPipeline err: %v", err)
+		}
+
+		body, err := os.ReadFile(filepath.Join(root, "sub", "go.mod"))
+		if err != nil {
+			t.Fatalf("read sub/go.mod: %v", err)
+		}
+		if !strings.Contains(string(body), "example.test/proj v0.1.0") {
+			t.Errorf("sub/go.mod = %q, want the require left at v0.1.0 — v0.0.0 is not a version anyone released", body)
+		}
+	})
+}
+
+// TestApplyPipelineAllSkippedNothingToTag guards the exit that the
+// version-map seeding must not break: a plan where every entry is
+// skipped — including ones with real released versions — performs
+// no git operation. The map being non-empty no longer implies
+// there is anything to tag.
+func TestApplyPipelineAllSkippedNothingToTag(t *testing.T) {
+	t.Parallel()
+	root, mods, plan := twoModuleRepo(t)
+	plan[0] = PlanEntry{
+		Module: modules.Module{Dir: "."}, OldVersion: "0.2.0",
+		NewVersion: "0.2.0", Level: BumpNone, Reason: "no commits",
+	}
+	plan[1] = PlanEntry{
+		Module: modules.Module{Dir: "sub"}, OldVersion: "0.1.1",
+		NewVersion: "0.1.1", Level: BumpNone, Reason: "no commits",
+	}
+	runner := &gitFakeRunner{}
+
+	var out strings.Builder
+	if err := ApplyPipeline(t.Context(), runner, root, &out, mods, plan,
+		Options{AllowDirty: true, Message: "release"}); err != nil {
+		t.Fatalf("ApplyPipeline err: %v", err)
+	}
+	if !strings.Contains(out.String(), "nothing to tag") {
+		t.Errorf("output = %q, want the nothing-to-tag notice", out.String())
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("git ran %d times, want none for an all-skipped plan", len(runner.calls))
+	}
+}
 
 // pipelineRepo builds a single-module workspace on disk and returns
 // the root plus the module set and a one-entry plan for it.
