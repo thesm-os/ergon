@@ -118,6 +118,47 @@ func Run(
 	return nil
 }
 
+// maxSkipDetailLines caps the per-package explanation. gobco's
+// useful output is its first line or two; anything beyond that has
+// been a stack frame in every case observed.
+const maxSkipDetailLines = 2
+
+// skipDetail renders the explanation lines for one skipped package.
+//
+// gobco fails by panicking, so reason carries a full goroutine dump
+// below the message that names the cause. The dump describes the
+// instrumenter's own call stack and says nothing about the package
+// under test, so it is cut at the `goroutine ` marker and the
+// remainder capped — twenty frames per skipped package buries the
+// one line a reader needs.
+//
+// Falls back to naming the workspace dependency when gobco produced
+// no output at all, which is the only thing known about the failure
+// in that case.
+func skipDetail(reason, dep string) []string {
+	if strings.TrimSpace(reason) == "" {
+		return []string{"imports " + dep}
+	}
+	var out []string
+	for line := range strings.SplitSeq(strings.TrimSpace(reason), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "goroutine ") {
+			break
+		}
+		out = append(out, line)
+		if len(out) == maxSkipDetailLines {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return []string{"imports " + dep}
+	}
+	return out
+}
+
 // writeSkipNotice reports every package gobco could not measure
 // because it reaches across workspace modules, naming the
 // dependency responsible.
@@ -142,16 +183,19 @@ func writeSkipNotice(w io.Writer, s style.Style, stats []pkgStats) {
 	s.Header(w, "branch", "packages gobco could not measure")
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  %s\n", s.Dimmed(
-		"gobco copies the module to a temp directory to instrument it. ergon "+
-			"stages an alternate go.mod pinning intra-workspace dependencies to "+
-			"absolute paths so the copy still resolves them; these packages "+
-			"failed even so — a replace target outside the workspace, or a "+
-			"dependency that is genuinely unresolvable."))
+		"gobco exited without producing coverage for these packages. Its own "+
+			"output follows each one — the cause is usually in the instrumenter "+
+			"rather than in the package."))
 	fmt.Fprintln(w)
 	for _, st := range skipped {
-		fmt.Fprintf(w, "  %s   %s %s\n",
-			s.Dimmed("SKIP"), st.Pkg.RepoRel,
-			s.Dimmed("(imports "+st.SkippedFor+")"))
+		fmt.Fprintf(w, "  %s   %s\n", s.Dimmed("SKIP"), st.Pkg.RepoRel)
+		// gobco's own message when it produced one; the coupling
+		// that qualified the package for demotion otherwise. Naming
+		// the dependency alone reads as an accusation against it,
+		// and in every case observed it was not at fault.
+		for _, line := range skipDetail(st.SkipReason, st.SkippedFor) {
+			fmt.Fprintf(w, "         %s\n", s.Dimmed(line))
+		}
 	}
 	fmt.Fprintf(w, "\n  %s\n\n", s.Dimmed(fmt.Sprintf(
 		"%d package(s) excluded from every layer aggregate below.", len(skipped))))
@@ -381,6 +425,16 @@ type pkgStats struct {
 	// explicitly rather than letting the layer percentage quietly
 	// be computed over a smaller denominator.
 	SkippedFor string
+
+	// SkipReason is gobco's own output for a skipped package — the
+	// panic or error it exited with. Reported verbatim rather than
+	// summarised: the causes observed in practice (a build-tag pair
+	// type-checked together, a generic type alias the instrumenter
+	// cannot parse) are not ones ergon can enumerate, and a notice
+	// that names a cause it did not observe misdirects the reader.
+	// Empty when the package was measured, or when the failure
+	// produced no output.
+	SkipReason string
 }
 
 // runGobcoAllPackages spawns a bounded worker pool that runs
@@ -443,6 +497,11 @@ func runGobcoAllPackages(
 				if gerr != nil {
 					if dep, coupled := coupledModule(j.pkg, imports); coupled {
 						st.SkippedFor = dep
+						// Carry gobco's own message forward: it is
+						// the only account of why this package could
+						// not be measured, and the notice has no
+						// other basis on which to explain itself.
+						st.SkipReason = gerr.Error()
 						gerr = nil
 					}
 				}
@@ -484,6 +543,18 @@ func runGobcoAllPackages(
 // a staged go.mod whose intra-workspace replaces are absolute, which
 // is what lets gobco's relocated copy resolve sibling modules — see
 // [stageModfile].
+//
+// # Environment
+//
+// gobco runs under GODEBUG=gotypesalias=1. Its own go.mod declares
+// `go 1.16`, and the toolchain derives GODEBUG defaults from that
+// directive — 1.16 predates generic type aliases, so gotypesalias
+// defaults to 0 and the instrumenter's type-checker rejects any
+// package whose dependency graph contains one, panicking before it
+// instruments anything. Setting it here rather than documenting a
+// workaround keeps the gate measuring what it claims to measure:
+// on go.thesmos.sh/testkit the override recovered 177 of the
+// engine layer's 601 conditions.
 func runGobcoOne(
 	ctx context.Context, runner xexec.Runner,
 	_ string, pkg pkgInfo, statsPath, modfilePath string,
@@ -495,7 +566,12 @@ func runGobcoOne(
 	}
 	args = append(args, ".")
 	err := runner.Run(ctx,
-		xexec.Options{Dir: pkg.Dir, Stdout: &buf, Stderr: &buf},
+		xexec.Options{
+			Dir:    pkg.Dir,
+			Stdout: &buf,
+			Stderr: &buf,
+			Env:    []string{"GODEBUG=gotypesalias=1"},
+		},
 		"gobco", args...)
 	if err != nil {
 		// "nothing to instrument" is gobco's non-zero exit for a

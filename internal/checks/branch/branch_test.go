@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -212,6 +213,7 @@ type fakeRunner struct {
 	gobcoCalls int
 	gobcoDirs  []string
 	gobcoArgs  [][]string
+	gobcoEnv   []string
 }
 
 func (f *fakeRunner) Run(
@@ -231,6 +233,7 @@ func (f *fakeRunner) Run(
 	f.gobcoCalls++
 	f.gobcoDirs = append(f.gobcoDirs, filepath.ToSlash(opts.Dir))
 	f.gobcoArgs = append(f.gobcoArgs, append([]string(nil), args...))
+	f.gobcoEnv = append(f.gobcoEnv, opts.Env...)
 	if opts.Stdout != nil {
 		_, _ = opts.Stdout.Write([]byte(f.gobcoOut))
 	}
@@ -784,6 +787,60 @@ func TestWorkspaceCoupledPackagesSkip(t *testing.T) {
 	})
 }
 
+// TestRunGobcoOneEnablesTypeAliases pins the GODEBUG the gobco
+// subprocess runs under.
+//
+// gobco's own go.mod declares `go 1.16`, which predates generic
+// type aliases, so the toolchain defaults gotypesalias to 0 for
+// it. Any package whose dependency graph contains a generic type
+// alias then fails to type-check and gobco panics before
+// instrumenting anything. On go.thesmos.sh/testkit this silently
+// dropped two of the engine layer's packages — 177 of 601
+// conditions — and reported them as unresolvable workspace
+// dependencies, which they were not.
+func TestRunGobcoOneEnablesTypeAliases(t *testing.T) {
+	t.Parallel()
+	f := &fakeRunner{}
+	if _, err := runGobcoOne(t.Context(), f, "",
+		pkgInfo{Dir: t.TempDir()}, filepath.Join(t.TempDir(), "s.json"), ""); err != nil {
+		t.Fatalf("runGobcoOne err: %v", err)
+	}
+	if !slices.Contains(f.gobcoEnv, "GODEBUG=gotypesalias=1") {
+		t.Errorf("env = %v, want it to carry GODEBUG=gotypesalias=1", f.gobcoEnv)
+	}
+}
+
+// TestRunGobcoAllPackagesRecordsSkipReason pins that a demoted
+// failure carries gobco's own message forward. The reason is what
+// the notice prints; without it the notice can only guess, and it
+// guessed wrong for every package it ever skipped.
+func TestRunGobcoAllPackagesRecordsSkipReason(t *testing.T) {
+	t.Parallel()
+	root := wsOnDisk(t)
+	f := &fakeRunner{
+		gobcoErr: errors.New("exit status 2"),
+		gobcoOut: "panic: race_off.go:9:7: RaceEnabled redeclared in this block",
+	}
+	pkgs := []pkgInfo{{
+		ImportPath: "example.test/ws/beta",
+		Dir:        filepath.Join(root, "beta"),
+		RepoRel:    "beta",
+		Imports:    []string{"example.test/ws/alpha"},
+	}}
+
+	stats, err := runGobcoAllPackages(
+		t.Context(), f, io.Discard, root, pkgs, wsImports, 1)
+	if err != nil {
+		t.Fatalf("runGobcoAllPackages err: %v", err)
+	}
+	if stats[0].SkippedFor == "" {
+		t.Fatal("SkippedFor empty, want the package demoted to a skip")
+	}
+	if !strings.Contains(stats[0].SkipReason, "RaceEnabled redeclared") {
+		t.Errorf("SkipReason = %q, want gobco's own message", stats[0].SkipReason)
+	}
+}
+
 // TestWriteSkipNotice pins the reporting. A skipped package
 // contributes no conditions, so the set has to be stated
 // explicitly — otherwise a layer whose packages were all skipped
@@ -819,6 +876,68 @@ func TestWriteSkipNotice(t *testing.T) {
 		}
 		if strings.Contains(got, "alpha\n") && !strings.Contains(got, "beta") {
 			t.Error("output names a measured package as skipped")
+		}
+	})
+
+	// The notice used to assert a cause it had never observed: "a
+	// replace target outside the workspace, or a dependency that is
+	// genuinely unresolvable". On the repository that prompted this,
+	// all three skips were gobco defects — a build-tag pair it
+	// type-checks together, and a type alias it cannot parse — and
+	// none was a resolution failure. A confident wrong diagnosis
+	// costs more than none at all.
+	t.Run("prints gobco's own message and asserts no cause of its own", func(t *testing.T) {
+		t.Parallel()
+		var out strings.Builder
+		writeSkipNotice(&out, style.Style{}, []pkgStats{{
+			Pkg:        pkgInfo{RepoRel: "engine/model"},
+			SkippedFor: "example.test/ws",
+			SkipReason: "panic: model/race_off.go:9:7: RaceEnabled redeclared in this block",
+		}})
+		got := out.String()
+		if !strings.Contains(got, "RaceEnabled redeclared") {
+			t.Errorf("output = %q, want gobco's own message", got)
+		}
+		for _, forbidden := range []string{"genuinely unresolvable", "replace target outside"} {
+			if strings.Contains(got, forbidden) {
+				t.Errorf("output = %q, must not assert %q — it is not observed", got, forbidden)
+			}
+		}
+	})
+
+	// gobco panics, so its output carries a full goroutine dump.
+	// The first line names the cause; the frames below it are the
+	// instrumenter's own call stack and say nothing about the
+	// package under test. Printing them buries the one useful line
+	// under twenty useless ones, per skipped package.
+	t.Run("drops the goroutine dump below a panic", func(t *testing.T) {
+		t.Parallel()
+		var out strings.Builder
+		writeSkipNotice(&out, style.Style{}, []pkgStats{{
+			Pkg:        pkgInfo{RepoRel: "engine/model"},
+			SkippedFor: "example.test/ws",
+			SkipReason: "gobco: exit status 2: panic: race_off.go:9:7: RaceEnabled redeclared\n\n" +
+				"goroutine 1 [running]:\nmain.ok(...)\n\tutil.go:100\nmain.main()\n\tmain.go:20",
+		}})
+		got := out.String()
+		if !strings.Contains(got, "RaceEnabled redeclared") {
+			t.Errorf("output = %q, want the panic's first line", got)
+		}
+		for _, noise := range []string{"goroutine 1", "main.ok", "util.go:100"} {
+			if strings.Contains(got, noise) {
+				t.Errorf("output = %q, must not carry the stack frame %q", got, noise)
+			}
+		}
+	})
+
+	t.Run("falls back to the dependency when no reason was captured", func(t *testing.T) {
+		t.Parallel()
+		var out strings.Builder
+		writeSkipNotice(&out, style.Style{}, []pkgStats{{
+			Pkg: pkgInfo{RepoRel: "beta"}, SkippedFor: "example.test/ws/alpha",
+		}})
+		if got := out.String(); !strings.Contains(got, "example.test/ws/alpha") {
+			t.Errorf("output = %q, want the dependency named", got)
 		}
 	})
 }
