@@ -142,9 +142,11 @@ func writeSkipNotice(w io.Writer, s style.Style, stats []pkgStats) {
 	s.Header(w, "branch", "packages gobco could not measure")
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  %s\n", s.Dimmed(
-		"gobco instruments by copying the module to a temp directory, which "+
-			"loses the go.work context and breaks relative replace targets. "+
-			"Packages importing another workspace module cannot be measured."))
+		"gobco copies the module to a temp directory to instrument it. ergon "+
+			"stages an alternate go.mod pinning intra-workspace dependencies to "+
+			"absolute paths so the copy still resolves them; these packages "+
+			"failed even so — a replace target outside the workspace, or a "+
+			"dependency that is genuinely unresolvable."))
 	fmt.Fprintln(w)
 	for _, st := range skipped {
 		fmt.Fprintf(w, "  %s   %s %s\n",
@@ -170,12 +172,43 @@ func renderTarget(stdout io.Writer, s style.Style, layer coverage.Layer, agg lay
 
 	pct := agg.Pct()
 	pass := pct >= float64(layer.Branch)
+	// A partially-measured layer's percentage is computed over a
+	// smaller denominator than the reader assumes, so the shortfall
+	// is stated on the same line as the number it qualifies.
+	partial := ""
+	if agg.SkippedPkgs > 0 && agg.Total > 0 {
+		partial = s.Dimmed(fmt.Sprintf(
+			"   [%d package(s) not measured]", agg.SkippedPkgs))
+	}
 	fmt.Fprintf(stdout,
-		"  Branch:     %5.1f%%  (%d / %d conditions fully covered)\n",
-		pct, agg.Covered, agg.Total)
+		"  Branch:     %5.1f%%  (%d / %d conditions fully covered)%s\n",
+		pct, agg.Covered, agg.Total, partial)
+
+	// The two zero-condition states are named here rather than
+	// tested inline in the switch below. Go's coverage records a
+	// block starting AFTER a case's expression list, so a condition
+	// written in a case clause sits outside every covered block and
+	// reads as unreachable to mutation testing however well it is
+	// tested. Hoisting also lets each state carry its own name.
+	empty := agg.Total == 0
+	unmeasured := empty && agg.SkippedPkgs > 0
 
 	switch {
-	case agg.Total == 0:
+	case unmeasured:
+		// Measured nothing because its packages could not be
+		// measured — NOT the same as having no conditions. Reporting
+		// both as one verdict is how a gate that has stopped working
+		// comes to look identical to a gate that is working, so this
+		// state is named and, when the layer gates, fails.
+		fmt.Fprintf(stdout, "  Verdict:    %s   %s\n\n",
+			s.Fail(), s.Dimmed(fmt.Sprintf(
+				"NOT MEASURED — %d package(s) skipped, 0 conditions collected",
+				agg.SkippedPkgs)))
+		if layer.RequireBranch {
+			return true
+		}
+		return false
+	case empty:
 		fmt.Fprintf(stdout, "  Verdict:    %s\n\n", s.Dimmed("— no conditions in scope"))
 		return false
 	case pass:
@@ -367,6 +400,21 @@ func runGobcoAllPackages(
 	}
 	defer os.RemoveAll(tmpDir)
 
+	// Stage one alternate go.mod per module that reaches across
+	// workspace modules, so gobco's relocated copy can still resolve
+	// its siblings. Modules that need no staging map to a zero value
+	// and are invoked without -modfile, leaving the single-module
+	// path byte-identical to before.
+	staged := map[string]stagedModfile{}
+	for _, ip := range imports {
+		sm, stageErr := stageModfile(
+			root, ip.Dir, siblingsFor(ip.Dir, pkgs, imports), imports, tmpDir)
+		if stageErr != nil {
+			return nil, stageErr
+		}
+		staged[ip.Dir] = sm
+	}
+
 	type job struct {
 		idx int
 		pkg pkgInfo
@@ -383,8 +431,9 @@ func runGobcoAllPackages(
 	for range workers {
 		wg.Go(func() {
 			for j := range jobs {
+				mod := staged[owningModuleDir(j.pkg.RepoRel, imports)]
 				rec, gerr := runGobcoOne(ctx, runner, root, j.pkg,
-					filepath.Join(tmpDir, fmt.Sprintf("%d.json", j.idx)))
+					filepath.Join(tmpDir, fmt.Sprintf("%d.json", j.idx)), mod.Path)
 				st := pkgStats{Pkg: j.pkg, Records: rec}
 				// A failure is demoted to a skip only when the
 				// package reaches across workspace modules — the
@@ -429,14 +478,25 @@ func runGobcoAllPackages(
 // and decodes the resulting JSON. A package with no instrumentable
 // branches returns an empty record list with nil error — gobco
 // prints "nothing to instrument" and skips writing the stats file.
+//
+// modfilePath, when non-empty, is forwarded to the underlying
+// `go test` as `-modfile` via gobco's `-test` passthrough. It names
+// a staged go.mod whose intra-workspace replaces are absolute, which
+// is what lets gobco's relocated copy resolve sibling modules — see
+// [stageModfile].
 func runGobcoOne(
 	ctx context.Context, runner xexec.Runner,
-	_ string, pkg pkgInfo, statsPath string,
+	_ string, pkg pkgInfo, statsPath, modfilePath string,
 ) ([]condRecord, error) {
 	var buf bytes.Buffer
+	args := []string{"-branch", "-stats", statsPath}
+	if modfilePath != "" {
+		args = append(args, "-test", "-modfile="+modfilePath)
+	}
+	args = append(args, ".")
 	err := runner.Run(ctx,
 		xexec.Options{Dir: pkg.Dir, Stdout: &buf, Stderr: &buf},
-		"gobco", "-branch", "-stats", statsPath, ".")
+		"gobco", args...)
 	if err != nil {
 		// "nothing to instrument" is gobco's non-zero exit for a
 		// package without conditionals. Treat as empty data; the
@@ -466,6 +526,13 @@ func runGobcoOne(
 type layerStats struct {
 	Total   int // number of conditions claimed by the layer
 	Covered int // subset of Total whose TrueCount > 0 AND FalseCount > 0
+
+	// SkippedPkgs counts the packages claimed by this layer that
+	// gobco could not measure. It is what separates "this layer has
+	// no conditions" from "this layer was not measured" — two states
+	// that otherwise both report Total == 0 and would render the
+	// same verdict.
+	SkippedPkgs int
 }
 
 // Pct returns the layer's branch-coverage percentage in the half-
@@ -502,6 +569,14 @@ func aggregateByLayer(
 	}
 	seen := map[key]*agg{}
 	for _, ps := range stats {
+		// An unmeasured package is attributed to its layer so the
+		// renderer can tell an empty layer from an unmeasured one.
+		if ps.SkippedFor != "" {
+			if idx := coverage.LongestPrefixLayerIdx(packages, ps.Pkg.RepoRel); idx >= 0 {
+				out[idx].SkippedPkgs++
+			}
+			continue
+		}
 		for _, r := range ps.Records {
 			file := relativeFile(ps.Pkg.RepoRel, r.Start)
 			if policy.MatchesExclude(file, excludes) {

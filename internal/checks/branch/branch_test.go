@@ -211,6 +211,7 @@ type fakeRunner struct {
 	listCalls  int
 	gobcoCalls int
 	gobcoDirs  []string
+	gobcoArgs  [][]string
 }
 
 func (f *fakeRunner) Run(
@@ -229,6 +230,7 @@ func (f *fakeRunner) Run(
 
 	f.gobcoCalls++
 	f.gobcoDirs = append(f.gobcoDirs, filepath.ToSlash(opts.Dir))
+	f.gobcoArgs = append(f.gobcoArgs, append([]string(nil), args...))
 	if opts.Stdout != nil {
 		_, _ = opts.Stdout.Write([]byte(f.gobcoOut))
 	}
@@ -351,7 +353,7 @@ func TestRunGobcoOne(t *testing.T) {
 		runner := &fakeRunner{statsByDir: map[string]string{filepath.ToSlash(dir): stats}}
 
 		recs, err := runGobcoOne(t.Context(), runner, "", pkgInfo{Dir: dir},
-			filepath.Join(t.TempDir(), "s.json"))
+			filepath.Join(t.TempDir(), "s.json"), "")
 		if err != nil {
 			t.Fatalf("runGobcoOne: %v", err)
 		}
@@ -375,7 +377,7 @@ func TestRunGobcoOne(t *testing.T) {
 			gobcoErr: errors.New("exit status 1"),
 		}
 		recs, err := runGobcoOne(t.Context(), runner, "", pkgInfo{Dir: t.TempDir()},
-			filepath.Join(t.TempDir(), "s.json"))
+			filepath.Join(t.TempDir(), "s.json"), "")
 		if err != nil {
 			t.Fatalf("runGobcoOne err = %v, want nil for the benign exit", err)
 		}
@@ -389,7 +391,7 @@ func TestRunGobcoOne(t *testing.T) {
 		// gobco skips writing the file when it found nothing to do.
 		runner := &fakeRunner{}
 		recs, err := runGobcoOne(t.Context(), runner, "", pkgInfo{Dir: t.TempDir()},
-			filepath.Join(t.TempDir(), "absent.json"))
+			filepath.Join(t.TempDir(), "absent.json"), "")
 		if err != nil {
 			t.Fatalf("runGobcoOne err = %v, want nil", err)
 		}
@@ -405,7 +407,7 @@ func TestRunGobcoOne(t *testing.T) {
 			gobcoErr: errors.New("exit status 2"),
 		}
 		_, err := runGobcoOne(t.Context(), runner, "", pkgInfo{Dir: t.TempDir()},
-			filepath.Join(t.TempDir(), "s.json"))
+			filepath.Join(t.TempDir(), "s.json"), "")
 		if err == nil {
 			t.Fatal("runGobcoOne returned nil, want the gobco failure")
 		}
@@ -419,7 +421,7 @@ func TestRunGobcoOne(t *testing.T) {
 		dir := t.TempDir()
 		runner := &fakeRunner{statsByDir: map[string]string{filepath.ToSlash(dir): "{not json"}}
 		_, err := runGobcoOne(t.Context(), runner, "", pkgInfo{Dir: dir},
-			filepath.Join(t.TempDir(), "s.json"))
+			filepath.Join(t.TempDir(), "s.json"), "")
 		if err == nil {
 			t.Fatal("runGobcoOne returned nil, want a JSON parse error")
 		}
@@ -614,6 +616,7 @@ func TestRun(t *testing.T) {
 var wsImports = []modules.Import{
 	{Dir: ".", ImportPath: "example.test/ws"},
 	{Dir: "alpha", ImportPath: "example.test/ws/alpha"},
+	{Dir: "beta", ImportPath: "example.test/ws/beta"},
 }
 
 // TestCoupledModule pins the detection rule for the one layout
@@ -685,18 +688,46 @@ func TestCoupledModule(t *testing.T) {
 	})
 }
 
+// wsOnDisk materialises the two-module workspace wsImports declares:
+// a root module plus `alpha`, each with a real go.mod. The staging
+// step reads those files, and by the time Run is reached
+// discover.ModuleImports has already read every go.mod to resolve
+// the import paths — so a declared module without one is not a state
+// the gate has to tolerate.
+func wsOnDisk(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		full := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", rel, err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	write("go.mod", "module example.test/ws\n\ngo 1.26\n")
+	write("alpha/go.mod", "module example.test/ws/alpha\n\ngo 1.26\n")
+	write("beta/go.mod", "module example.test/ws/beta\n\ngo 1.26\n")
+	return root
+}
+
 // TestWorkspaceCoupledPackagesSkip covers the demotion: a gobco
 // failure on a workspace-coupled package becomes a reported skip,
 // while every other failure still fails the run.
 func TestWorkspaceCoupledPackagesSkip(t *testing.T) {
 	t.Parallel()
 
+	root := wsOnDisk(t)
 	coupled := pkgInfo{
-		ImportPath: "example.test/ws/beta", Dir: t.TempDir(), RepoRel: "beta",
+		ImportPath: "example.test/ws/beta",
+		Dir:        filepath.Join(root, "beta"), RepoRel: "beta",
 		Imports: []string{"example.test/ws/alpha"},
 	}
 	standalone := pkgInfo{
-		ImportPath: "example.test/ws/alpha", Dir: t.TempDir(), RepoRel: "alpha",
+		ImportPath: "example.test/ws/alpha",
+		Dir:        filepath.Join(root, "alpha"), RepoRel: "alpha",
 		Imports: []string{"fmt"},
 	}
 
@@ -707,7 +738,7 @@ func TestWorkspaceCoupledPackagesSkip(t *testing.T) {
 			gobcoErr: errors.New("exit status 1"),
 		}
 		got, err := runGobcoAllPackages(t.Context(), runner, io.Discard,
-			t.TempDir(), []pkgInfo{coupled}, wsImports, 2)
+			root, []pkgInfo{coupled}, wsImports, 2)
 		if err != nil {
 			t.Fatalf("runGobcoAllPackages err = %v, want the failure demoted", err)
 		}
@@ -725,7 +756,7 @@ func TestWorkspaceCoupledPackagesSkip(t *testing.T) {
 			gobcoErr: errors.New("exit status 1"),
 		}
 		_, err := runGobcoAllPackages(t.Context(), runner, io.Discard,
-			t.TempDir(), []pkgInfo{standalone}, wsImports, 2)
+			root, []pkgInfo{standalone}, wsImports, 2)
 		if err == nil {
 			t.Fatal("runGobcoAllPackages returned nil, want the real failure surfaced")
 		}
@@ -740,7 +771,7 @@ func TestWorkspaceCoupledPackagesSkip(t *testing.T) {
 			filepath.ToSlash(coupled.Dir): `[{"Start":"b.go:1:1","Code":"c","TrueCount":1,"FalseCount":1}]`,
 		}}
 		got, err := runGobcoAllPackages(t.Context(), runner, io.Discard,
-			t.TempDir(), []pkgInfo{coupled}, wsImports, 2)
+			root, []pkgInfo{coupled}, wsImports, 2)
 		if err != nil {
 			t.Fatalf("runGobcoAllPackages: %v", err)
 		}
@@ -788,6 +819,144 @@ func TestWriteSkipNotice(t *testing.T) {
 		}
 		if strings.Contains(got, "alpha\n") && !strings.Contains(got, "beta") {
 			t.Error("output names a measured package as skipped")
+		}
+	})
+}
+
+// TestRenderTargetNotMeasured pins the verdict that separates "this
+// layer has no conditions" from "this layer was not measured".
+//
+// Both report Total == 0. Rendering them identically is how a gate
+// that has silently stopped working comes to look exactly like a
+// gate that is working — the failure mode this distinction exists
+// to close.
+func TestRenderTargetNotMeasured(t *testing.T) {
+	t.Parallel()
+
+	t.Run("skipped packages and no conditions fails a gating layer", func(t *testing.T) {
+		t.Parallel()
+		var out strings.Builder
+		layer := coverage.Layer{Path: "engine/...", Branch: 80, RequireBranch: true}
+		failed := renderTarget(&out, style.Style{}, layer,
+			layerStats{Total: 0, Covered: 0, SkippedPkgs: 10})
+		if !failed {
+			t.Fatalf("renderTarget returned false, want an unmeasured gating layer to fail: %q",
+				out.String())
+		}
+		if !strings.Contains(out.String(), "NOT MEASURED") {
+			t.Errorf("output = %q, want the NOT MEASURED verdict", out.String())
+		}
+		if !strings.Contains(out.String(), "10 package(s) skipped") {
+			t.Errorf("output = %q, want the skipped count", out.String())
+		}
+	})
+
+	t.Run("an informational layer reports but does not fail", func(t *testing.T) {
+		t.Parallel()
+		var out strings.Builder
+		layer := coverage.Layer{Path: "engine/...", Branch: 80, RequireBranch: false}
+		notMeasured := layerStats{Total: 0, SkippedPkgs: 3}
+		if renderTarget(&out, style.Style{}, layer, notMeasured) {
+			t.Error("renderTarget returned true, want an informational layer not to gate")
+		}
+		if !strings.Contains(out.String(), "NOT MEASURED") {
+			t.Errorf("output = %q, want the state still named", out.String())
+		}
+	})
+
+	t.Run("genuinely empty layer still passes quietly", func(t *testing.T) {
+		t.Parallel()
+		// No skips: the layer really has nothing to measure (all
+		// single-expression wrappers, say), which is not a fault.
+		var out strings.Builder
+		layer := coverage.Layer{Path: "pool/...", Branch: 80, RequireBranch: true}
+		if renderTarget(&out, style.Style{}, layer, layerStats{Total: 0, SkippedPkgs: 0}) {
+			t.Error("renderTarget returned true, want an genuinely empty layer to pass")
+		}
+		if !strings.Contains(out.String(), "no conditions in scope") {
+			t.Errorf("output = %q, want the empty-scope notice", out.String())
+		}
+		if strings.Contains(out.String(), "NOT MEASURED") {
+			t.Errorf("output = %q, want NOT MEASURED reserved for skips", out.String())
+		}
+	})
+
+	t.Run("a partially measured layer says so on the number", func(t *testing.T) {
+		t.Parallel()
+		// The percentage is over a smaller denominator than a reader
+		// assumes, so the shortfall belongs beside the figure.
+		var out strings.Builder
+		layer := coverage.Layer{Path: "engine/...", Branch: 50, RequireBranch: true}
+		partial := layerStats{Total: 10, Covered: 9, SkippedPkgs: 4}
+		if renderTarget(&out, style.Style{}, layer, partial) {
+			t.Error("renderTarget returned true, want a passing aggregate to pass")
+		}
+		if !strings.Contains(out.String(), "4 package(s) not measured") {
+			t.Errorf("output = %q, want the partial-measurement note", out.String())
+		}
+	})
+}
+
+// TestAggregateByLayerAttributesSkips pins the per-layer skip count
+// the NOT MEASURED verdict reads.
+func TestAggregateByLayerAttributesSkips(t *testing.T) {
+	t.Parallel()
+
+	packages := []coverage.Layer{
+		{Path: "engine/...", Branch: 80, RequireBranch: true},
+		{Path: "cli/...", Branch: 80, RequireBranch: true},
+	}
+	stats := []pkgStats{
+		{Pkg: pkgInfo{RepoRel: "engine/model"}, SkippedFor: "example.test/kit"},
+		{Pkg: pkgInfo{RepoRel: "engine/model/bmc"}, SkippedFor: "example.test/kit"},
+		{
+			Pkg:     pkgInfo{RepoRel: "cli"},
+			Records: []condRecord{{Start: "a.go:1:1", TrueCount: 1, FalseCount: 1}},
+		},
+		// Claimed by no layer; must not be counted anywhere.
+		{Pkg: pkgInfo{RepoRel: "tools/gen"}, SkippedFor: "example.test/kit"},
+	}
+
+	out := aggregateByLayer(stats, packages, nil, nil, nil)
+	if out[0].SkippedPkgs != 2 || out[0].Total != 0 {
+		t.Errorf("engine layer = %+v, want 2 skips and no conditions", out[0])
+	}
+	if out[1].SkippedPkgs != 0 || out[1].Total != 1 {
+		t.Errorf("cli layer = %+v, want no skips and one condition", out[1])
+	}
+}
+
+// TestRunGobcoOneForwardsModfile pins the flag wiring: the staged
+// modfile reaches `go test` through gobco's -test passthrough, and is
+// omitted entirely when no staging was needed.
+func TestRunGobcoOneForwardsModfile(t *testing.T) {
+	t.Parallel()
+
+	t.Run("forwards the staged modfile", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{}
+		if _, err := runGobcoOne(t.Context(), runner, "", pkgInfo{Dir: t.TempDir()},
+			filepath.Join(t.TempDir(), "s.json"), "/abs/staged.mod"); err != nil {
+			t.Fatalf("runGobcoOne: %v", err)
+		}
+		if len(runner.gobcoArgs) != 1 {
+			t.Fatalf("calls = %v, want one", runner.gobcoArgs)
+		}
+		joined := strings.Join(runner.gobcoArgs[0], " ")
+		if !strings.Contains(joined, "-test -modfile=/abs/staged.mod") {
+			t.Errorf("args = %q, want the modfile passed through -test", joined)
+		}
+	})
+
+	t.Run("omits the flag when nothing was staged", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{}
+		if _, err := runGobcoOne(t.Context(), runner, "", pkgInfo{Dir: t.TempDir()},
+			filepath.Join(t.TempDir(), "s.json"), ""); err != nil {
+			t.Fatalf("runGobcoOne: %v", err)
+		}
+		if joined := strings.Join(runner.gobcoArgs[0], " "); strings.Contains(joined, "modfile") {
+			t.Errorf("args = %q, want no -modfile for an unstaged module", joined)
 		}
 	})
 }
