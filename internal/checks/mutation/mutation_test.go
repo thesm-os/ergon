@@ -778,64 +778,6 @@ func TestTestCPUFlagIsNeverPassed(t *testing.T) {
 	}
 }
 
-// TestEffectiveScore pins the arithmetic that stops a suite whose
-// mutants hang from scoring well. gremlins drops timed-out mutants
-// from its own denominator, so such a layer is graded only on the
-// mutants that terminated — the less the suite constrains, the
-// better it looks.
-func TestEffectiveScore(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name     string
-		reported float64
-		counts   mutantCounts
-		want     float64
-	}{
-		{
-			// The observed go.thesmos.sh/core clock layer: a perfect
-			// reported score clearing a 99% threshold with three
-			// mutants never evaluated at all.
-			name:     "timeouts drag a reported 100% under the threshold",
-			reported: 100,
-			counts:   mutantCounts{Killed: 32, TimedOut: 3},
-			want:     91.42857142857143,
-		},
-		{
-			name:     "no timeouts passes gremlins' own figure through",
-			reported: 87.5,
-			counts:   mutantCounts{Killed: 7, Lived: 1},
-			want:     87.5,
-		},
-		{
-			name:     "survivors and timeouts both count against",
-			reported: 80,
-			counts:   mutantCounts{Killed: 8, Lived: 2, TimedOut: 10},
-			want:     40,
-		},
-		{
-			// NotCovered is deliberately outside the denominator: an
-			// uncovered mutant is a coverage failure, and the
-			// coverage threshold judges it separately.
-			name:     "not-covered mutants stay out of the denominator",
-			reported: 100,
-			counts:   mutantCounts{Killed: 4, NotCovered: 6, TimedOut: 1},
-			want:     80,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := effectiveScore(tc.reported, tc.counts)
-			if diff := got - tc.want; diff > 1e-9 || diff < -1e-9 {
-				t.Errorf("effectiveScore(%v, %+v) = %v, want %v",
-					tc.reported, tc.counts, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestNoViableMutantsPasses covers a layer gremlins finds nothing to
 // mutate in — single-expression generic wrappers with no branch or
 // arithmetic to alter. gremlins emits no metrics for it, which is

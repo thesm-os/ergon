@@ -252,9 +252,12 @@ func resolveCoverage(l Layer) int {
 // per-target section. Returns true when at least one threshold
 // missed.
 //
-// The score checked against the threshold is [effectiveScore], not
-// the figure gremlins printed: timed-out mutants are unevaluated,
-// and gremlins omits them from its own denominator.
+// A timed-out mutant counts as killed, not as a survivor: the suite
+// distinguished it from the original, which is what killing means.
+// The count is surfaced on the Mutants line because a hang is
+// expensive and worth fixing, but it is not a quality verdict —
+// tightening timeout_coefficient would otherwise turn a tuning
+// parameter into a failing score.
 func renderTarget(
 	ctx context.Context, runner xexec.Runner,
 	stdout io.Writer, s style.Style,
@@ -302,16 +305,10 @@ func renderTarget(
 		counts.Killed, counts.Lived, counts.NotCovered, counts.TimedOut,
 		s.Dimmed(formatElapsed(elapsed)))
 
-	effective := effectiveScore(score, counts)
-	passScore := effective >= float64(t.Score)
+	passScore := score >= float64(t.Score)
 	passCoverage := coverage >= float64(t.Coverage)
 	fmt.Fprintf(stdout, "  Score:     %5.1f%%   (≥ %d%%)   %s\n",
-		effective, t.Score, verdictMark(s, passScore))
-	if counts.TimedOut > 0 {
-		fmt.Fprintf(stdout, "             %s\n", s.Dimmed(fmt.Sprintf(
-			"gremlins reported %.1f%%; %d timed out and are counted unkilled",
-			score, counts.TimedOut)))
-	}
+		score, t.Score, verdictMark(s, passScore))
 	fmt.Fprintf(stdout, "  Coverage:  %5.1f%%   (≥ %d%%)   %s\n",
 		coverage, t.Coverage, verdictMark(s, passCoverage))
 
@@ -485,32 +482,6 @@ func parsePercent(out, prefix string) (float64, bool) {
 		found = true
 	}
 	return value, found
-}
-
-// effectiveScore recomputes test efficacy with timed-out mutants
-// returned to the denominator.
-//
-// gremlins reports efficacy as killed/(killed+lived) and drops
-// timed-out mutants from the calculation entirely, so a layer whose
-// mutants hang scores on only the handful that terminated: the more
-// the suite fails to constrain, the better it looks. A timed-out
-// mutant was not killed. The suite failed to detect it and merely
-// failed slowly rather than quickly, which is not a pass.
-//
-// Measured on go.thesmos.sh/core's clock layer: 32 killed, 0 lived,
-// 3 timed out reported 100.0% and passed a 99% threshold. The same
-// counts here yield 91.4%.
-//
-// Returns reported unchanged when nothing timed out, so the common
-// path preserves gremlins' own arithmetic and rounding rather than
-// re-deriving a value that should agree and might not.
-func effectiveScore(reported float64, c mutantCounts) float64 {
-	if c.TimedOut == 0 {
-		return reported
-	}
-	// A non-zero TimedOut guarantees a non-zero denominator, so no
-	// division guard is needed past this point.
-	return float64(c.Killed) / float64(c.Killed+c.Lived+c.TimedOut) * 100
 }
 
 // mutantCounts groups the four classifications the per-target

@@ -246,12 +246,13 @@ checks:
     # regardless of what the suite asserts. The key is retained
     # because the config decoder is strict.
     #
-    # A timed-out mutant is counted as unkilled. gremlins drops
-    # timeouts from its own efficacy denominator, so a package
-    # whose mutants hang is graded only on the ones that
-    # terminated — scoring better the less its suite constrains.
-    # ergon returns them to the denominator, so a reported score
-    # may sit below the figure gremlins printed.
+    # A timed-out mutant counts as killed: the suite distinguished
+    # it from the original, which is what killing means. Timeouts
+    # show on the Mutants line because a hang is expensive and
+    # worth fixing, but they are not a quality verdict — scoring
+    # them as survivors would turn timeout_coefficient into a
+    # threshold, failing a layer for being tuned tightly rather
+    # than for testing poorly.
     #
     # If this gate ever runs implausibly fast or reports zero
     # LIVED tree-wide, suspect the invocation before believing
