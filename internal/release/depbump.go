@@ -122,14 +122,58 @@ func ApplyPipeline(
 		}
 	}
 
+	// A skipped module's own requires are rewritten once, up front,
+	// against the finished plan.
+	//
+	// layerReady drops skipped entries before they can reach a
+	// layer, so bumpOwnRequires — which iterates that layer — never
+	// opened their go.mod files. A module skipped for having no
+	// commits still depends on the ones that moved, so it kept
+	// requiring superseded versions. Where the workspace resolves
+	// siblings through local replace directives, `go mod tidy` then
+	// raises those requirements from local content: the tree is
+	// dirty the moment the release finishes and the mod stage of
+	// the gate fails.
+	//
+	// Up front, not after the loop drains, because the release
+	// workflow verifies at the tagged commit. A repair commit made
+	// after tagging leaves every tag carrying the stale go.mod, the
+	// gate keeps failing at all of them, and no release record is
+	// ever created — while the tags are pushed and the proxy has
+	// cached them immutably. The values are knowable this early:
+	// versions is complete before the first tag, so `released` is
+	// passed as fully-resolved rather than reflecting progress.
+	var pendingSkipped []string
+	if !opts.NoBump {
+		resolved := map[string]bool{}
+		var skippedDirs []string
+		for _, e := range plan {
+			resolved[e.Module.Dir] = true
+			if e.Skipped() {
+				skippedDirs = append(skippedDirs, e.Module.Dir)
+			}
+		}
+		var bumpErr error
+		pendingSkipped, bumpErr = bumpOwnRequires(root, skippedDirs, versions, resolved)
+		if bumpErr != nil {
+			return bumpErr
+		}
+	}
+
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Tagging...")
+	// Each layer is headed so the signing prompts below it are
+	// attributable: a ten-module release otherwise reads as an
+	// undifferentiated run of PIN prompts.
+	layer := 0
 
 	for {
 		ready := layerReady(plan, deps, released)
 		if len(ready) == 0 {
 			break
 		}
+		layer++
+		fmt.Fprintf(w, "\nlayer %d — %s\n", layer, strings.Join(tagNames(ready, plan), ", "))
 
 		// Step 1: rewrite this layer's own go.mods to require the
 		// prior-layer versions. Step 2: tidy. Step 3: commit.
@@ -148,6 +192,13 @@ func ApplyPipeline(
 				return err
 			}
 		}
+		// Fold the skipped modules into the first layer that commits,
+		// so their go.mod files are in the tree every tag points at.
+		if len(pendingSkipped) > 0 {
+			bumped = append(bumped, pendingSkipped...)
+			sort.Strings(bumped)
+			pendingSkipped = nil
+		}
 		if len(bumped) > 0 {
 			// Tidy is gated on push-mode because it needs the
 			// prior-layer tags resolvable through the proxy or
@@ -160,10 +211,15 @@ func ApplyPipeline(
 				}
 			}
 			msg := PinCommitMessage(tagNames(ready, plan))
+			// Announced before the call, not after. Signing blocks on
+			// a hardware-key PIN prompt, and a prompt with nothing
+			// above it naming the operation asks the operator to
+			// authorise something they cannot see.
+			fmt.Fprintf(w, "  commit  %s  (%s)\n",
+				pinCommitSubject, strings.Join(bumped, ", "))
 			if err := commitPaths(ctx, runner, root, bumpedPaths(root, bumped), msg); err != nil {
 				return layerFailure(ready, plan, "commit", err)
 			}
-			fmt.Fprintf(w, "  bumped go.mod in %d module(s)\n", len(bumped))
 		}
 
 		// Step 4: tag this layer at the (possibly new) HEAD.
@@ -174,16 +230,17 @@ func ApplyPipeline(
 		for _, dir := range ready {
 			entry := planEntry(plan, dir)
 			body := entry.Tag + "\n\n" + opts.Message
+			fmt.Fprintf(w, "  tag     %s\n", entry.Tag)
 			if err := EnsureTag(ctx, runner, root, entry.Tag, body); err != nil {
 				return fmt.Errorf("git tag %s: %w", entry.Tag, err)
 			}
 			released[dir] = true
-			fmt.Fprintln(w, "  ", entry.Tag)
 		}
 
 		// Step 5: push so the next iteration's tidy can resolve
 		// these tags through the proxy or direct git fetch.
 		if !opts.NoPush {
+			fmt.Fprintf(w, "  push    %s\n", strings.Join(tagNames(ready, plan), ", "))
 			if err := pushFollowTags(ctx, runner, root); err != nil {
 				return layerFailure(ready, plan, "push", err)
 			}

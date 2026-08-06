@@ -109,6 +109,179 @@ func TestPinCommitMessage(t *testing.T) {
 	}
 }
 
+// threeModuleRepo builds root <- mid <- leaf, the shape the skipped
+// module has to be tested against: leaf reaches a released module
+// THROUGH a third rather than directly, which is what bit eidos.
+func threeModuleRepo(t *testing.T) (root string, mods []modules.Module, plan []PlanEntry) {
+	t.Helper()
+	root = t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", rel, err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	write("go.mod", "module example.test/proj\n\ngo 1.26\n")
+	write("mid/go.mod", "module example.test/proj/mid\n\ngo 1.26\n\n"+
+		"require example.test/proj v0.1.0\n")
+	write("leaf/go.mod", "module example.test/proj/leaf\n\ngo 1.26\n\n"+
+		"require (\n\texample.test/proj v0.1.0\n\texample.test/proj/mid v0.1.0\n)\n")
+
+	mods = []modules.Module{{Dir: "."}, {Dir: "mid"}, {Dir: "leaf"}}
+	plan = []PlanEntry{
+		{
+			Module: modules.Module{Dir: "."}, Level: BumpMinor,
+			OldVersion: "0.1.0", NewVersion: "0.2.0", Tag: "v0.2.0", Reason: "feat",
+		},
+		{
+			Module: modules.Module{Dir: "mid"}, Level: BumpPatch,
+			OldVersion: "0.1.0", NewVersion: "0.1.1", Tag: "mid/v0.1.1", Reason: "fix",
+		},
+		{
+			// Skipped: no commits in its own scope. It still depends
+			// on both modules that moved.
+			Module: modules.Module{Dir: "leaf"}, Level: BumpNone,
+			OldVersion: "0.1.0", NewVersion: "0.1.0", Reason: "no commits in module scope",
+		},
+	}
+	return root, mods, plan
+}
+
+// TestApplyPipelinePinsSkippedModules covers the direction the
+// version map alone does not fix.
+//
+// A skipped module keeps requiring the versions its siblings sat on
+// before the release. Where the workspace resolves siblings through
+// local replace directives, `go mod tidy` then raises those
+// requirements from local content, so the tree is dirty the moment
+// the release finishes and the mod stage of the gate fails.
+//
+// The rewrite has to land before the FIRST tag, not after the last.
+// The release workflow verifies at the tagged commit, so a repair
+// commit made after tagging leaves every tag still carrying the
+// stale go.mod — the gate keeps failing at all of them and no
+// release record is ever created.
+func TestApplyPipelinePinsSkippedModules(t *testing.T) {
+	t.Parallel()
+
+	root, mods, plan := threeModuleRepo(t)
+	runner := &gitFakeRunner{}
+
+	if err := ApplyPipeline(t.Context(), runner, root, io.Discard, mods, plan,
+		Options{AllowDirty: true, Message: "release"}); err != nil {
+		t.Fatalf("ApplyPipeline err: %v", err)
+	}
+
+	body, err := os.ReadFile(filepath.Join(root, "leaf", "go.mod"))
+	if err != nil {
+		t.Fatalf("read leaf/go.mod: %v", err)
+	}
+	for _, want := range []string{
+		"example.test/proj v0.2.0",
+		"example.test/proj/mid v0.1.1",
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("leaf/go.mod = %q, want it to require %q", body, want)
+		}
+	}
+
+	// leaf is never tagged — pinning its requires is not releasing
+	// it.
+	for _, tag := range tagNamesFrom(runner) {
+		if strings.HasPrefix(tag, "leaf/") {
+			t.Errorf("tags = %v, want no tag for the skipped module", tagNamesFrom(runner))
+		}
+	}
+
+	// Ordering is the whole point: leaf/go.mod must be staged
+	// before any tag exists, or the tags carry the stale file.
+	stagedLeafAt, firstTagAt := -1, -1
+	for i, c := range runner.calls {
+		if c.name != "git" || len(c.args) == 0 {
+			continue
+		}
+		if stagedLeafAt < 0 && c.args[0] == "add" && slices.Contains(c.args, "leaf/go.mod") {
+			stagedLeafAt = i
+		}
+		if firstTagAt < 0 && c.args[0] == "tag" && slices.Contains(c.args, "-a") {
+			firstTagAt = i
+		}
+	}
+	if stagedLeafAt < 0 {
+		t.Fatalf("calls = %+v, want leaf/go.mod staged", runner.calls)
+	}
+	if firstTagAt < 0 || stagedLeafAt > firstTagAt {
+		t.Errorf("leaf/go.mod staged at %d, first tag at %d — want the pin before any tag",
+			stagedLeafAt, firstTagAt)
+	}
+}
+
+// TestApplyPipelineAnnouncesBeforeSigning pins the ordering that
+// makes a signed release reviewable.
+//
+// Every commit, tag and push can block on a hardware-key PIN
+// prompt. Naming the operation after the call returns means the
+// operator reads "Enter PIN for ED25519-SK key:" with nothing on
+// screen saying what it is for, and learns what they signed only
+// once the signature is given. Each assertion here forces the git
+// operation to fail: the announcement can only appear if it was
+// written before the call.
+func TestApplyPipelineAnnouncesBeforeSigning(t *testing.T) {
+	t.Parallel()
+
+	failOn := func(sub string) *gitFakeRunner {
+		return &gitFakeRunner{decide: func(_ string, args []string) error {
+			if len(args) > 0 && args[0] == sub {
+				return errors.New("exit status 1")
+			}
+			return nil
+		}}
+	}
+
+	t.Run("the tag is named before git tag runs", func(t *testing.T) {
+		t.Parallel()
+		root, mods, plan := twoModuleRepo(t)
+		var out strings.Builder
+		_ = ApplyPipeline(t.Context(), failOn("tag"), root, &out, mods, plan,
+			Options{AllowDirty: true, Message: "release"})
+		if !strings.Contains(out.String(), "v0.2.0") {
+			t.Errorf("output = %q, want the tag named before it is signed", out.String())
+		}
+	})
+
+	t.Run("the commit is described before git commit runs", func(t *testing.T) {
+		t.Parallel()
+		root, mods, plan := twoModuleRepo(t)
+		var out strings.Builder
+		_ = ApplyPipeline(t.Context(), failOn("commit"), root, &out, mods, plan,
+			Options{AllowDirty: true, Message: "release"})
+		got := out.String()
+		if !strings.Contains(got, "commit") {
+			t.Errorf("output = %q, want the commit announced before it is signed", got)
+		}
+		// The module count is what tells the operator the commit is
+		// the small mechanical one and not something unexpected.
+		if !strings.Contains(got, "sub") {
+			t.Errorf("output = %q, want the affected module named", got)
+		}
+	})
+
+	t.Run("the push is named before git push runs", func(t *testing.T) {
+		t.Parallel()
+		root, mods, plan := twoModuleRepo(t)
+		var out strings.Builder
+		_ = ApplyPipeline(t.Context(), failOn("push"), root, &out, mods, plan,
+			Options{AllowDirty: true, Message: "release"})
+		if !strings.Contains(out.String(), "push") {
+			t.Errorf("output = %q, want the push announced before it is signed", out.String())
+		}
+	})
+}
+
 // TestApplyPipelineFailureNamesLayer pins the diagnostic contract
 // for mid-pipeline git failures: the error names the layer in
 // flight, the failing step, and the resume path. The eidos
@@ -537,8 +710,11 @@ func TestApplyPipelineRewritesDependentRequires(t *testing.T) {
 	if !strings.Contains(string(body), "example.test/proj v0.2.0") {
 		t.Errorf("sub/go.mod = %q, want the require pinned to v0.2.0", body)
 	}
-	if !strings.Contains(out.String(), "bumped go.mod in 1 module(s)") {
-		t.Errorf("output = %q, want the bump reported", out.String())
+	// Named before the commit is signed, and naming the module
+	// rather than counting them: "1 module(s)" told the operator
+	// nothing about what they were about to authorise.
+	if !strings.Contains(out.String(), "commit  "+pinCommitSubject+"  (sub)") {
+		t.Errorf("output = %q, want the commit announced with its module", out.String())
 	}
 
 	// Ordering: the root's tag must precede the dependent's.
