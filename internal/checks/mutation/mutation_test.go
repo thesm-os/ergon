@@ -104,6 +104,45 @@ func TestRun(t *testing.T) {
 		}
 	})
 
+	t.Run("--mutants reports a passing layer too", func(t *testing.T) {
+		t.Parallel()
+		root := buildTree(t, "foundation")
+		cfg := Config{Packages: []Layer{{Path: "foundation/...", Score: 90, Coverage: 90}}}
+		// Thresholds are met, so the layer passes — yet five mutants
+		// survived. Those are the ones worth naming, and the summary
+		// alone cannot locate them.
+		out := gremlinsOutput(95, 95) +
+			"   LIVED       CONDITIONALS_NEGATION at one.go:10:5\n" +
+			"   NOT COVERED ARITHMETIC_BASE at two.go:12:5\n"
+
+		run := func(t *testing.T, opts RunOptions) string {
+			t.Helper()
+			var buf strings.Builder
+			if err := Run(t.Context(), &fakeRunner{output: out}, &buf, io.Discard,
+				root, cfg, nil, nil, opts); err != nil {
+				t.Fatalf("Run err: %v", err)
+			}
+			return buf.String()
+		}
+
+		quiet := run(t, RunOptions{})
+		asked := run(t, RunOptions{Verbose: true})
+
+		// The breakdown used to be tied to the verdict, so --mutants
+		// printed no mutants whenever the layer passed — which is
+		// when a survivor is cheapest to fix. Asking must answer.
+		for _, want := range []string{"one.go", "two.go"} {
+			if !strings.Contains(asked, want) {
+				t.Errorf("--mutants output = %q, want it to name %q", asked, want)
+			}
+		}
+		// The default stays quiet, or every green run grows a wall of
+		// text nobody asked for.
+		if strings.Contains(quiet, "one.go") {
+			t.Errorf("default output = %q, want the breakdown withheld", quiet)
+		}
+	})
+
 	t.Run("score below threshold fails", func(t *testing.T) {
 		t.Parallel()
 		root := buildTree(t, "foundation")

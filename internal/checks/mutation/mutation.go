@@ -24,8 +24,7 @@ import (
 
 // RunOptions carries the per-invocation overrides the cobra layer
 // passes through to [Run]. Targets restricts which layers run;
-// Verbose dumps every non-killed mutant location for the failing
-// layers.
+// Verbose dumps every non-killed mutant location.
 type RunOptions struct {
 	// Targets is the list of layer prefixes the user wants to
 	// exercise. Each entry is either `<layer>` (the layer key as
@@ -35,9 +34,15 @@ type RunOptions struct {
 	Targets []string
 
 	// Verbose, when true, prints every non-killed mutant (LIVED /
-	// NOT COVERED / TIMED OUT) verbatim under each failing layer so
+	// NOT COVERED / TIMED OUT) verbatim under each layer so
 	// developers can jump straight to the file:line:col that needs a
 	// new test.
+	//
+	// Under every layer, not only failing ones: a survivor is
+	// actionable whether or not enough of its neighbours have
+	// accumulated to drag the layer below its threshold, and a flag
+	// that answers only on failure cannot be used to keep a passing
+	// layer clean.
 	Verbose bool
 }
 
@@ -331,12 +336,22 @@ func renderTarget(
 	fmt.Fprintf(stdout, "  Coverage:  %5.1f%%   (≥ %d%%)   %s\n",
 		coverage, t.Coverage, verdictMark(s, passCoverage))
 
-	if passScore && passCoverage {
-		fmt.Fprintln(stdout)
+	failed := !passScore || !passCoverage
+	fmt.Fprintln(stdout)
+
+	// A passing layer stays quiet unless the breakdown was asked
+	// for. It was previously suppressed even then, which made
+	// --mutants print no mutants — the one thing its name promises.
+	//
+	// Tying the report to the verdict hid the work that matters
+	// most: survivors accumulate silently while a layer sits above
+	// its threshold, and only become visible once enough of them
+	// have gathered to push it under. By then the list is long and
+	// the cause is old. Asking for it should answer.
+	if !failed && !verbose {
 		return false
 	}
 
-	fmt.Fprintln(stdout)
 	files := parseMutantFiles(out)
 	if len(files) > 0 {
 		writeContributingFiles(stdout, s, repoRelPrefix(root, dir), files)
@@ -344,7 +359,7 @@ func renderTarget(
 	if verbose && len(files) > 0 {
 		writeNonKilledMutants(stdout, s, out, files)
 	}
-	return true
+	return failed
 }
 
 // noViableMutantsSignal is gremlins' output for a target it found

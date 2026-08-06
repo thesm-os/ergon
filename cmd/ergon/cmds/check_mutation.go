@@ -12,7 +12,8 @@ import (
 )
 
 // mutationVerbose toggles the "Non-killed mutants" dump in the
-// per-target report. Bound to `--mutants` on [checkMutationCmd];
+// per-target report, for every layer rather than only failing
+// ones. Bound to `--mutants` on [checkMutationCmd];
 // the root `-v / --verbose` flag is reserved for the
 // stream-vs-buffer toggle so it carries its own name here.
 var mutationVerbose bool
