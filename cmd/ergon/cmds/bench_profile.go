@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.thesmos.sh/ergon/internal/bench"
+	"go.thesmos.sh/ergon/internal/config"
 	"go.thesmos.sh/ergon/internal/discover"
 	xexec "go.thesmos.sh/ergon/internal/exec"
 )
@@ -64,11 +65,7 @@ var benchProfileCmd = &cobra.Command{
 		}
 		outputDir := benchProfileFlags.outputDir
 		if outputDir == "" {
-			name := cfg.Name
-			if name == "" {
-				name = filepath.Base(root)
-			}
-			outputDir = filepath.Join(root, "."+name, "profiles")
+			outputDir = filepath.Join(root, config.ArtifactDir, "profiles")
 		}
 		return bench.Profile(ctx, xexec.Command{},
 			cmd.OutOrStdout(), cmd.ErrOrStderr(),

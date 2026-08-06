@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"go.thesmos.sh/ergon/internal/config"
 	"go.thesmos.sh/ergon/internal/discover"
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/test"
@@ -77,15 +78,11 @@ func testInputs(ctx context.Context) (test.Inputs, error) {
 	if err != nil {
 		return test.Inputs{}, err
 	}
-	name := cfg.Name
-	if name == "" {
-		name = filepath.Base(root)
-	}
 	return test.Inputs{
 		Root:        root,
 		Modules:     mods,
 		Imports:     imports,
-		CoverageDir: filepath.Join(root, "."+name, "coverage"),
+		CoverageDir: filepath.Join(root, config.ArtifactDir, "coverage"),
 	}, nil
 }
 

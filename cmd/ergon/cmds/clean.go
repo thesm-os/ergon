@@ -29,11 +29,7 @@ var cleanCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		name := cfg.Name
-		if name == "" {
-			name = filepath.Base(root)
-		}
-		if err := clean.Run(cmd.OutOrStdout(), root, name); err != nil {
+		if err := clean.Run(cmd.OutOrStdout(), root); err != nil {
 			return err
 		}
 		// Reclaim per-run temp roots abandoned by killed runs. The

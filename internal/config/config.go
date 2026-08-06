@@ -27,6 +27,22 @@ import (
 	"go.thesmos.sh/ergon/internal/test"
 )
 
+// ArtifactDir is the repository-relative directory ergon writes its
+// own artefacts to: coverage profiles, the HTML reports rendered
+// from them, and benchmark profiles.
+//
+// Fixed rather than derived from [Config.Name], which is what it
+// used to be. A tool that names its directory after the project it
+// runs in will eventually collide with that project — eidos keeps
+// its own runtime state in `.eidos/`, so ergon put two unrelated
+// writers in one directory, and `ergon clean` would have deleted
+// state ergon does not own.
+//
+// Naming it after ergon also means a repository's `.gitignore` entry
+// no longer has to track that repository's own name, and one entry
+// serves every project ergon is adopted into.
+const ArtifactDir = ".ergon"
+
 // Config is the fully-resolved configuration for one ergon
 // invocation. Each field embeds a subsystem package's own Config
 // type so the schema stays close to the code that reads it.
@@ -36,10 +52,11 @@ import (
 // basename of the repository root, an empty [Config.Modules] gets
 // populated from `go.work`, etc.
 type Config struct {
-	// Name identifies the project. Drives the directory under
-	// which ergon writes coverage and build artifacts (`.ergon/`,
-	// `.eidos/`, ...) and appears in help banners. Defaults at
-	// runtime to the basename of the repository root.
+	// Name identifies the project. Appears in help banners and
+	// defaults at runtime to the basename of the repository root.
+	//
+	// It no longer selects the artefact directory — see
+	// [ArtifactDir].
 	Name string `yaml:"name"`
 
 	// Modules optionally fixes the module set ergon iterates,

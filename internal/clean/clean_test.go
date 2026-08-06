@@ -25,7 +25,7 @@ func TestRun(t *testing.T) {
 			}
 		}
 
-		if err := Run(io.Discard, root, "ergon"); err != nil {
+		if err := Run(io.Discard, root); err != nil {
 			t.Fatalf("Run err: %v", err)
 		}
 		for _, d := range []string{"bin", ".ergon", "dist"} {
@@ -38,15 +38,18 @@ func TestRun(t *testing.T) {
 	t.Run("missing targets are tolerated (idempotent)", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir() // nothing exists
-		if err := Run(io.Discard, root, "ergon"); err != nil {
+		if err := Run(io.Discard, root); err != nil {
 			t.Fatalf("Run on empty tree err: %v", err)
 		}
 	})
 
-	t.Run("Targets reflects the project name", func(t *testing.T) {
+	t.Run("Targets does not depend on the project name", func(t *testing.T) {
 		t.Parallel()
-		got := Targets("eidos")
-		want := []string{"bin", ".eidos", "dist"}
+		// Deriving this from the project name made `ergon clean` in a
+		// repository called eidos delete `.eidos/`, that project's own
+		// runtime state. Removal is confined to what ergon writes.
+		got := Targets()
+		want := []string{"bin", ".ergon", "dist"}
 		if len(got) != len(want) {
 			t.Fatalf("Targets = %+v, want %+v", got, want)
 		}

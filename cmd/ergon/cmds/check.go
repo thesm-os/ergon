@@ -13,6 +13,7 @@ import (
 	"go.thesmos.sh/ergon/internal/checks/branch"
 	"go.thesmos.sh/ergon/internal/checks/coverage"
 	"go.thesmos.sh/ergon/internal/checks/mutation"
+	"go.thesmos.sh/ergon/internal/config"
 	"go.thesmos.sh/ergon/internal/discover"
 	xexec "go.thesmos.sh/ergon/internal/exec"
 	"go.thesmos.sh/ergon/internal/lint"
@@ -103,11 +104,7 @@ var checkCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		name := cfg.Name
-		if name == "" {
-			name = filepath.Base(root)
-		}
-		coverageDir := filepath.Join(root, "."+name, "coverage")
+		coverageDir := filepath.Join(root, config.ArtifactDir, "coverage")
 
 		in, err := testInputs(ctx)
 		if err != nil {
