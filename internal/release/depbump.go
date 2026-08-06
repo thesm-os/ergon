@@ -23,28 +23,35 @@ import (
 //
 // For each topological layer (innermost dependencies first):
 //
-//  1. Rewrite this layer's go.mod files so every `require` line
-//     pointing at a prior-layer module pins to that module's
-//     just-tagged version.
-//  2. Run `go mod tidy` to refresh go.sum (the prior layers' tags
-//     are already on the remote from the previous iteration's
-//     push, so tidy can resolve them).
-//  3. Commit the bump as a single `chore(release):` commit.
-//  4. Tag every module in this layer at the new HEAD.
-//  5. `git push --follow-tags` so the new tags become visible to
-//     the next layer's tidy.
+//  1. Tag every module in this layer at HEAD.
+//  2. `git push --follow-tags`, publishing those versions.
+//  3. Rewrite the go.mod of every module that directly requires one
+//     of them, pinning to the version just published.
+//  4. Run `go mod tidy` in those modules to refresh go.sum — step 2
+//     put the versions on the remote, so they resolve.
+//  5. Commit the propagation as a single `chore(release):` commit.
 //
-// The bottom-up ordering means each module's tag commit literally
-// requires the correct versions of every intra-workspace
-// dependency. Downstream consumers (`go get <module>@vNEW`) read
-// the tagged go.mod and resolve correctly.
+// Propagation follows the push rather than preceding the tag, and
+// that ordering is the whole design. Pinning first would require
+// versions no tag has created yet, which is how a release died
+// against `unknown revision backend/golang/v1.7.0`. Pinning only
+// this layer's modules would leave every other module holding a
+// superseded require at the commit the next layer tags — and because
+// a locally replaced sibling is read off disk, they disagree the
+// instant one module moves, which is how seven modules came to fail
+// `go mod tidy` at an already-published tag.
+//
+// The invariant the ordering buys: a layer's commit is the commit
+// the next layer tags, and it is internally consistent. The final
+// layer is the leaf set — nothing requires it, so it propagates
+// nothing and leaves no commit dangling past the last push.
 //
 // Options that shape the pipeline:
 //
 //   - NoTag: print the plan, do nothing else.
-//   - NoBump: skip steps 1–3; tag every layer at the initial HEAD
-//     without rewriting go.mods. Independent of NoPush — setting
-//     one does not set the other.
+//   - NoBump: skip steps 3–5; tag every layer without rewriting
+//     go.mods. Independent of NoPush — setting one does not set the
+//     other.
 //   - NoPush: also skip the per-layer pushes; the release stays
 //     local (useful for offline rehearsals).
 //   - AllowDirty: bypass the working-tree cleanliness check.
@@ -63,10 +70,25 @@ func ApplyPipeline(
 			return fmt.Errorf("release: check working tree: %w", err)
 		}
 		if dirty {
-			return fmt.Errorf(
-				"release: working tree has uncommitted changes; commit or stash them, " +
-					"or pass --allow-dirty to bypass this check",
-			)
+			if !opts.Resume {
+				return fmt.Errorf(
+					"release: working tree has uncommitted changes; commit or stash " +
+						"them, pass --resume to continue an interrupted release, or " +
+						"--allow-dirty to bypass this check entirely",
+				)
+			}
+			stray, strayErr := dirtOutsideModFiles(ctx, runner, root, mods)
+			if strayErr != nil {
+				return strayErr
+			}
+			if len(stray) > 0 {
+				return fmt.Errorf(
+					"release: --resume permits only uncommitted go.mod and go.sum "+
+						"files left by an interrupted run, but these also differ: %s; "+
+						"commit or stash them",
+					strings.Join(stray, ", "),
+				)
+			}
 		}
 	}
 
@@ -114,10 +136,101 @@ func ApplyPipeline(
 
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Tagging...")
+	// Tracks a propagation commit still awaiting a push; see the
+	// flush after the loop.
+	pending := false
+	// Modules whose version has already been written into their
+	// dependents, so no layer repeats another's work.
+	propagated := map[string]bool{}
 	// Each layer is headed so the signing prompts below it are
 	// attributable: a ten-module release otherwise reads as an
 	// undifferentiated run of PIN prompts.
 	layer := 0
+
+	// propagate writes every released-but-not-yet-propagated version
+	// into the modules that require it, then commits.
+	//
+	// Runs BEFORE the layer's own tags rather than after, so HEAD is
+	// already consistent when a tag is placed on it. In a clean run
+	// the emitted order is identical either way — a layer's sources
+	// are the previous layer's tags. It matters on a resume: a run
+	// interrupted between its tag and its commit leaves that
+	// propagation owed, and the re-run's plan reports the tagged
+	// module as skipped, so it is seeded as released and never
+	// appears in a layer. Propagating at the bottom would tag the
+	// next layer onto the tree the interrupted run failed to finish.
+	//
+	// Gated on NoBump rather than only the tidy and commit that
+	// follow: bumpOwnRequires writes go.mod files to disk, so calling
+	// it under --no-bump left the user with modified go.mods that
+	// were never committed while the tags pointed at commits without
+	// them. The flag means "do not touch my go.mods", so it has to
+	// skip the write too.
+	propagate := func() error {
+		if opts.NoBump {
+			return nil
+		}
+		var sources []string
+		for dir := range released {
+			if !propagated[dir] {
+				sources = append(sources, dir)
+				propagated[dir] = true
+			}
+		}
+		if len(sources) == 0 {
+			return nil
+		}
+		// deps and released are maps, so both this list and the
+		// dependents derived from it are sorted for a stable
+		// announcement.
+		sort.Strings(sources)
+		dependents := directDependents(deps, sources)
+		if len(dependents) == 0 {
+			return nil
+		}
+		// Snapshotted before either write, and over go.sum whether or
+		// not it exists yet, so a checksum file tidy creates from
+		// nothing still registers as a change.
+		candidates := modPaths(dependents)
+		before := snapshotPaths(root, candidates)
+		if _, err := bumpOwnRequires(root, dependents, versions, released); err != nil {
+			return err
+		}
+		// Tidy every dependent, not only those whose go.mod was
+		// rewritten. A module can need go.sum entries without needing
+		// a require bump: it reaches the new version transitively, or
+		// a locally replaced sibling's own requirements shifted under
+		// it. Gating tidy on "go.mod changed" left those go.sums
+		// stale in the tagged tree.
+		//
+		// Gated on push-mode because tidy resolves versions the push
+		// published. With --no-push those tags exist only locally, so
+		// go.sum stays stale until the user tidies after pushing.
+		if !opts.NoPush {
+			if err := tidyModules(ctx, runner, root, dependents, ownPaths); err != nil {
+				return err
+			}
+		}
+		// What to commit is decided by what actually differs on disk,
+		// not by what the bumper predicted: tidy edits go.sum behind
+		// the bumper's back, and a layer whose only effect was a
+		// checksum refresh must still be committed. Compared directly
+		// rather than asked of git, so the decision does not depend
+		// on a subprocess.
+		changed := changedSince(root, candidates, before)
+		if len(changed) == 0 {
+			return nil
+		}
+		names := propagatedNames(sources, plan)
+		fmt.Fprintf(w, "  commit  %s  (%s)\n",
+			pinCommitSubject, strings.Join(dirsOf(changed), ", "))
+		if err := commitPaths(
+			ctx, runner, root, changed, PinCommitMessage(names)); err != nil {
+			return layerFailure(sources, plan, "commit", err)
+		}
+		pending = true
+		return nil
+	}
 
 	for {
 		ready := layerReady(plan, deps, released)
@@ -127,51 +240,24 @@ func ApplyPipeline(
 		layer++
 		fmt.Fprintf(w, "\nlayer %d — %s\n", layer, strings.Join(tagNames(ready, plan), ", "))
 
-		// Step 1: rewrite this layer's own go.mods to require the
-		// prior-layer versions. Step 2: tidy. Step 3: commit.
-		//
-		// The rewrite is gated on NoBump, not just the tidy/commit
-		// that follow: bumpOwnRequires writes go.mod files to disk,
-		// so calling it under --no-bump left the user with modified
-		// go.mods that were never committed, while the tags pointed
-		// at commits without them. The flag means "do not touch my
-		// go.mods", so it has to skip the write too.
-		var bumped []string
-		if !opts.NoBump {
-			var err error
-			bumped, err = bumpOwnRequires(root, ready, versions, released)
-			if err != nil {
-				return err
-			}
-		}
-		if len(bumped) > 0 {
-			// Tidy is gated on push-mode because it needs the
-			// prior-layer tags resolvable through the proxy or
-			// direct git fetch. With --no-push the tags only
-			// exist locally, so we skip tidy and let go.sum
-			// stay stale until the user runs tidy after pushing.
-			if !opts.NoPush {
-				if err := tidyModules(ctx, runner, root, bumped, ownPaths); err != nil {
-					return err
-				}
-			}
-			msg := PinCommitMessage(tagNames(ready, plan))
-			// Announced before the call, not after. Signing blocks on
-			// a hardware-key PIN prompt, and a prompt with nothing
-			// above it naming the operation asks the operator to
-			// authorise something they cannot see.
-			fmt.Fprintf(w, "  commit  %s  (%s)\n",
-				pinCommitSubject, strings.Join(bumped, ", "))
-			if err := commitPaths(ctx, runner, root, bumpedPaths(root, bumped), msg); err != nil {
-				return layerFailure(ready, plan, "commit", err)
-			}
+		// Steps 3-5 of the PREVIOUS layer, settled before this one
+		// tags anything.
+		if err := propagate(); err != nil {
+			return err
 		}
 
-		// Step 4: tag this layer at the (possibly new) HEAD.
+		// Step 1: tag at HEAD, which is the previous layer's
+		// propagation commit.
+		//
 		// EnsureTag is idempotent — a tag left behind by a prior
 		// partial run that targeted the same version is preserved
 		// (when it points at HEAD) so retrying does not re-tag or
 		// move the existing tag.
+		//
+		// Announced before each call, not after. Signing blocks on a
+		// hardware-key PIN prompt, and a prompt with nothing above it
+		// naming the operation asks the operator to authorise
+		// something they cannot see.
 		for _, dir := range ready {
 			entry := planEntry(plan, dir)
 			body := entry.Tag + "\n\n" + opts.Message
@@ -182,13 +268,31 @@ func ApplyPipeline(
 			released[dir] = true
 		}
 
-		// Step 5: push so the next iteration's tidy can resolve
-		// these tags through the proxy or direct git fetch.
+		// Step 2: publish, so the propagation below resolves these
+		// versions from a remote that actually has them.
 		if !opts.NoPush {
 			fmt.Fprintf(w, "  push    %s\n", strings.Join(tagNames(ready, plan), ", "))
 			if err := pushFollowTags(ctx, runner, root); err != nil {
 				return layerFailure(ready, plan, "push", err)
 			}
+			pending = false
+		}
+	}
+
+	// The final layer is the leaf set — nothing requires it, so this
+	// normally finds nothing. --no-cascade breaks that: a dependent
+	// the cascade would have promoted stays skipped, so it is written
+	// to but never tagged.
+	if err := propagate(); err != nil {
+		return err
+	}
+
+	// A propagation commit is otherwise published by the next layer's
+	// push; a trailing one has no later push to carry it.
+	if pending && !opts.NoPush {
+		fmt.Fprintln(w, "\n  push    trailing propagation commit")
+		if err := pushFollowTags(ctx, runner, root); err != nil {
+			return fmt.Errorf("release: push trailing propagation commit: %w", err)
 		}
 	}
 
@@ -366,6 +470,168 @@ func workspaceDeps(root string, mods []modules.Module) (map[string]map[string]bo
 		}
 	}
 	return out, nil
+}
+
+// modPaths returns the repo-relative go.mod and go.sum path of each
+// directory, whether or not either file exists yet.
+func modPaths(dirs []string) []string {
+	out := make([]string, 0, len(dirs)*2)
+	for _, d := range dirs {
+		out = append(out, filepath.Join(d, "go.mod"), filepath.Join(d, "go.sum"))
+	}
+	return out
+}
+
+// snapshotPaths records the current bytes of each path. A path that
+// does not exist is recorded absent, so its later creation reads as
+// a change rather than as no-op.
+func snapshotPaths(root string, paths []string) map[string]string {
+	out := make(map[string]string, len(paths))
+	for _, p := range paths {
+		// A read failure is treated as absence on purpose: the only
+		// consequence is that the path is considered changed and
+		// gets committed, which is the safe direction.
+		if body, err := os.ReadFile(filepath.Join(root, p)); err == nil {
+			out[p] = string(body)
+		}
+	}
+	return out
+}
+
+// changedSince returns the paths whose contents differ from before,
+// skipping any that still do not exist.
+func changedSince(root string, paths []string, before map[string]string) []string {
+	var out []string
+	for _, p := range paths {
+		body, err := os.ReadFile(filepath.Join(root, p))
+		if err != nil {
+			continue
+		}
+		prior, existed := before[p]
+		if !existed || prior != string(body) {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// dirsOf reduces a list of go.mod / go.sum paths to the sorted set
+// of module directories holding them, for the commit announcement.
+func dirsOf(paths []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range paths {
+		d := filepath.ToSlash(filepath.Dir(p))
+		if !seen[d] {
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// dirtOutsideModFiles returns the uncommitted paths that are not a
+// workspace module's go.mod or go.sum.
+//
+// This is what makes --resume narrower than --allow-dirty. An
+// interrupted release leaves exactly those two files edited, in
+// modules it was mid-propagation on, so permitting them lets the
+// release be picked up where it stopped. Permitting anything else
+// would let unrelated working-tree edits ride into a tagged tree,
+// which is the accident the cleanliness check exists to prevent and
+// which cannot be undone once the proxy caches the tag.
+func dirtOutsideModFiles(
+	ctx context.Context, runner xexec.Runner, root string, mods []modules.Module,
+) ([]string, error) {
+	allowed := make(map[string]bool, len(mods)*2)
+	for _, m := range mods {
+		for _, p := range modPaths([]string{m.Dir}) {
+			// Compared against git's output, which is always
+			// slash-separated regardless of platform.
+			allowed[filepath.ToSlash(p)] = true
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := runner.Run(ctx,
+		xexec.Options{Dir: root, Stdout: &buf, Stderr: &buf},
+		"git", "status", "--porcelain"); err != nil {
+		return nil, fmt.Errorf("release: git status: %w: %s",
+			err, strings.TrimSpace(buf.String()))
+	}
+	var stray []string
+	for line := range strings.SplitSeq(buf.String(), "\n") {
+		// Porcelain v1: two status columns, a space, then the path.
+		if len(line) < 4 {
+			continue
+		}
+		p := strings.TrimSpace(line[3:])
+		if !allowed[p] {
+			stray = append(stray, p)
+		}
+	}
+	sort.Strings(stray)
+	return stray, nil
+}
+
+// propagatedNames returns the tag naming each source module's
+// current version, for the propagation commit's body.
+//
+// Falls back to reconstructing the tag from OldVersion when the plan
+// carries none: on a resumed release the module was tagged by the
+// interrupted run, so this run reports it as skipped with an empty
+// Tag — but its version is exactly what is being propagated, and a
+// commit body listing nothing would describe the wrong change.
+func propagatedNames(sources []string, plan []PlanEntry) []string {
+	out := make([]string, 0, len(sources))
+	for _, dir := range sources {
+		for _, e := range plan {
+			if e.Module.Dir != dir {
+				continue
+			}
+			if e.Tag != "" {
+				out = append(out, e.Tag)
+			} else if e.OldVersion != "" && e.OldVersion != initialVersion {
+				out = append(out, e.Module.TagPrefix()+"v"+e.OldVersion)
+			}
+			break
+		}
+	}
+	return out
+}
+
+// directDependents returns the workspace modules whose go.mod
+// directly requires at least one module in tagged.
+//
+// Direct is enough. A module that reaches a tagged one only through
+// an intermediary is unaffected until that intermediary is itself
+// tagged, which happens in a later layer and propagates from there.
+//
+// The result deliberately includes modules the plan skips: a skipped
+// module still requires its siblings, and leaving it un-propagated is
+// exactly what makes the workspace inconsistent at the next layer's
+// tag.
+func directDependents(deps map[string]map[string]bool, tagged []string) []string {
+	want := make(map[string]bool, len(tagged))
+	for _, d := range tagged {
+		want[d] = true
+	}
+	var out []string
+	for dir, ds := range deps {
+		for dep := range ds {
+			if want[dep] {
+				out = append(out, dir)
+				break
+			}
+		}
+	}
+	// deps is a map and Go randomises its iteration order; sorted so
+	// the commit's file list and the announcement above it read the
+	// same on every run.
+	sort.Strings(out)
+	return out
 }
 
 // layerReady returns the modules in plan whose intra-workspace
@@ -575,23 +841,6 @@ func pinChanges(root, moduleDir string, want map[string]string) ([]Pin, error) {
 	return out, nil
 }
 
-// bumpedPaths returns the go.mod + go.sum paths (relative to
-// root) for every module whose go.mod was rewritten by
-// [bumpOwnRequires] and then tidied by [tidyModules]. go.sum is
-// included when the file exists on disk — tidy in a module with
-// no external requires may not write one.
-func bumpedPaths(root string, bumped []string) []string {
-	out := make([]string, 0, len(bumped)*2)
-	for _, d := range bumped {
-		out = append(out, filepath.Join(d, "go.mod"))
-		sum := filepath.Join(root, d, "go.sum")
-		if _, err := os.Stat(sum); err == nil {
-			out = append(out, filepath.Join(d, "go.sum"))
-		}
-	}
-	return out
-}
-
 // readModulePath reads the `module` directive from a single
 // go.mod. Centralised so the bumper and dep-grapher agree on the
 // import-path discovery rule.
@@ -626,8 +875,14 @@ func planEntry(plan []PlanEntry, dir string) PlanEntry {
 const pinCommitSubject = "chore(release): pin intra-workspace deps"
 
 // PinCommitMessage renders the commit message for one layer's
-// go.mod rewrite. The subject is constant; the layer's tags are
-// listed in the body, one per line.
+// propagation. The subject is constant; the body lists the tags
+// whose versions the commit writes into their dependents, one per
+// line.
+//
+// The tags named are the ones this layer just published, not the
+// modules the commit edits: the commit exists because those
+// versions became real, and naming them is what lets a reader match
+// the commit to the push above it.
 //
 // Exported so the cobra layer can validate the generated message
 // against the repository's `checks.commit_msg` policy before the
@@ -637,8 +892,8 @@ const pinCommitSubject = "chore(release): pin intra-workspace deps"
 func PinCommitMessage(tags []string) string {
 	var b strings.Builder
 	b.WriteString(pinCommitSubject)
-	b.WriteString("\n\nPins every intra-workspace require in this layer to the\n")
-	b.WriteString("versions tagged by the preceding layers.\n\nTags in this layer:\n")
+	b.WriteString("\n\nPins every intra-workspace require naming these modules to\n")
+	b.WriteString("the versions this layer tagged and pushed.\n\nVersions propagated:\n")
 	for _, t := range tags {
 		b.WriteString("  - ")
 		b.WriteString(t)

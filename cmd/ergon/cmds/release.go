@@ -30,6 +30,7 @@ var releaseFlags struct {
 	noPush     bool
 	allowDirty bool
 	noCascade  bool
+	resume     bool
 }
 
 // releasePreflight rejects a release whose generated pin-commit
@@ -98,6 +99,7 @@ var releaseCmd = &cobra.Command{
 			return err
 		}
 		opts.NoCascade = releaseFlags.noCascade
+		opts.Resume = releaseFlags.resume
 		// release.Modules, when set, replaces the global module
 		// list for `ergon release` only — other subcommands keep
 		// using cfg.Modules. Empty falls through to the global
@@ -145,5 +147,8 @@ func init() {
 	releaseCmd.Flags().BoolVar(&releaseFlags.noCascade, "no-cascade", false,
 		"Do not release a module whose only change is a sibling it requires moving "+
 			"(default: patch-release it, so the rewritten go.mod reaches consumers)")
+	releaseCmd.Flags().BoolVar(&releaseFlags.resume, "resume", false,
+		"Continue a release interrupted partway through, allowing the go.mod and "+
+			"go.sum files it left uncommitted (any other change still aborts)")
 	rootCmd.AddCommand(releaseCmd)
 }

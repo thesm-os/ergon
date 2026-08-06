@@ -80,6 +80,18 @@ type Options struct {
 	// so the cobra layer sets it directly.
 	NoCascade bool
 
+	// Resume continues a release interrupted partway through.
+	//
+	// The pipeline is already idempotent — tags are re-created only
+	// when absent, and a re-run re-plans the unfinished remainder —
+	// but the working-tree cleanliness check refuses to start,
+	// because an interrupt leaves the propagation edits uncommitted.
+	// This narrows that check rather than disabling it: uncommitted
+	// go.mod and go.sum files are permitted, anything else still
+	// aborts. --allow-dirty remains the blunt instrument that
+	// permits everything.
+	Resume bool
+
 	// Version, when non-empty, overrides every module's bump
 	// resolution and pins every non-skipped module to this exact
 	// version. Useful for two cases the bump-inference path

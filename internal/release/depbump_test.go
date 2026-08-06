@@ -389,58 +389,62 @@ func TestDirectFetchEnvPreservesOperatorConfig(t *testing.T) {
 	}
 }
 
-// TestBumpedPaths pins the go.mod + (conditional) go.sum
-// enumeration for each bumped module: go.mod is always emitted,
-// go.sum is emitted only when the file exists on disk (tidy on
-// a module with no external requires may not write one).
-func TestBumpedPaths(t *testing.T) {
+// TestChangedSince pins what the pipeline decides to commit.
+//
+// The bumper cannot answer this on its own: `go mod tidy` rewrites
+// go.sum without telling it, so a layer whose only effect was a
+// checksum refresh would be dropped if the commit set came from the
+// bumper's return value. Comparing bytes also keeps the decision off
+// a `git status` subprocess, which the pipeline's fakes would have
+// to simulate.
+func TestChangedSince(t *testing.T) {
 	t.Parallel()
 
-	t.Run("emits go.mod and go.sum when both exist", func(t *testing.T) {
-		t.Parallel()
-		root := t.TempDir()
-		writeWorkspaceMod(t, root, "cli", "module example.com/proj/cli\n\ngo 1.26\n")
-		if err := os.WriteFile(filepath.Join(root, "cli", "go.sum"), nil, 0o600); err != nil {
-			t.Fatalf("seed go.sum: %v", err)
-		}
-		got := bumpedPaths(root, []string{"cli"})
-		// bumpedPaths produces filepath-joined results, so the want
-		// list is built the same way to stay portable across `/`
-		// (Linux/macOS) and `\` (Windows) separators.
-		want := []string{filepath.Join("cli", "go.mod"), filepath.Join("cli", "go.sum")}
-		if !slices.Equal(got, want) {
-			t.Errorf("got = %+v, want %+v", got, want)
-		}
-	})
+	root := t.TempDir()
+	writeWorkspaceMod(t, root, "cli", "module example.com/proj/cli\n\ngo 1.26\n")
+	writeWorkspaceMod(t, root, "api", "module example.com/proj/api\n\ngo 1.26\n")
 
-	t.Run("emits go.mod alone when go.sum is missing", func(t *testing.T) {
-		t.Parallel()
-		root := t.TempDir()
-		writeWorkspaceMod(t, root, "cli", "module example.com/proj/cli\n\ngo 1.26\n")
-		// No go.sum written.
-		got := bumpedPaths(root, []string{"cli"})
-		want := []string{filepath.Join("cli", "go.mod")}
-		if !slices.Equal(got, want) {
-			t.Errorf("got = %+v, want %+v", got, want)
-		}
-	})
+	paths := modPaths([]string{"cli", "api"})
+	before := snapshotPaths(root, paths)
 
-	t.Run("preserves input order across multiple modules", func(t *testing.T) {
-		t.Parallel()
-		root := t.TempDir()
-		for _, d := range []string{"a", "b", "c"} {
-			writeWorkspaceMod(t, root, d, "module example.com/proj/"+d+"\n\ngo 1.26\n")
-		}
-		got := bumpedPaths(root, []string{"a", "b", "c"})
-		want := []string{
-			filepath.Join("a", "go.mod"),
-			filepath.Join("b", "go.mod"),
-			filepath.Join("c", "go.mod"),
-		}
-		if !slices.Equal(got, want) {
-			t.Errorf("got = %+v, want %+v", got, want)
-		}
+	// cli/go.mod edited; api untouched; cli/go.sum created from
+	// nothing, which is what tidy does on a module that gains its
+	// first verifiable dependency.
+	if err := os.WriteFile(filepath.Join(root, "cli", "go.mod"),
+		[]byte("module example.com/proj/cli\n\ngo 1.26\n\nrequire x v1.0.0\n"), 0o600); err != nil {
+		t.Fatalf("rewrite cli/go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "cli", "go.sum"),
+		[]byte("x v1.0.0 h1:abc=\n"), 0o600); err != nil {
+		t.Fatalf("create cli/go.sum: %v", err)
+	}
+
+	got := changedSince(root, paths, before)
+	want := []string{filepath.Join("cli", "go.mod"), filepath.Join("cli", "go.sum")}
+	if !slices.Equal(got, want) {
+		t.Errorf("changedSince = %+v, want %+v", got, want)
+	}
+
+	// Re-running with a fresh snapshot yields nothing, which is the
+	// signal the pipeline uses to skip an empty commit entirely.
+	if again := changedSince(root, paths, snapshotPaths(root, paths)); len(again) != 0 {
+		t.Errorf("changedSince on a settled tree = %+v, want none", again)
+	}
+}
+
+// TestDirsOf pins the commit announcement's module list, which is
+// derived from the changed paths rather than tracked alongside them.
+func TestDirsOf(t *testing.T) {
+	t.Parallel()
+
+	got := dirsOf([]string{
+		filepath.Join("cli", "go.sum"),
+		filepath.Join("cli", "go.mod"),
+		filepath.Join("api", "go.mod"),
 	})
+	if want := []string{"api", "cli"}; !slices.Equal(got, want) {
+		t.Errorf("dirsOf = %+v, want %+v", got, want)
+	}
 }
 
 // TestTagNames pins the plan-entry → tag-name extraction the

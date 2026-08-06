@@ -49,6 +49,10 @@ func TestPipelineGitOpsBypassHooks(t *testing.T) {
 			// The message reaches git as the argument after -m: a
 			// constant subject with the tag list in the body, so
 			// multi-tag layers cannot overflow max_subject_length.
+			//
+			// The body names v0.2.0, the version this commit
+			// propagates — not sub/v0.1.1, which is tagged a layer
+			// later off the very commit being made here.
 			mi := slices.Index(c.args, "-m")
 			if mi < 0 || mi+1 >= len(c.args) {
 				t.Fatalf("commit args = %v, want -m <msg>", c.args)
@@ -57,8 +61,8 @@ func TestPipelineGitOpsBypassHooks(t *testing.T) {
 			if first, _, _ := strings.Cut(msg, "\n"); first != "chore(release): pin intra-workspace deps" {
 				t.Errorf("commit subject = %q, want the constant subject", first)
 			}
-			if !strings.Contains(msg, "\n  - sub/v0.1.1") {
-				t.Errorf("commit msg = %q, want the layer's tag in the body", msg)
+			if !strings.Contains(msg, "\n  - v0.2.0") {
+				t.Errorf("commit msg = %q, want the propagated tag in the body", msg)
 			}
 		case "push":
 			pushes++
@@ -151,28 +155,196 @@ func threeModuleRepo(t *testing.T) (root string, mods []modules.Module, plan []P
 	return root, mods, plan
 }
 
-// TestApplyPipelineLeavesSkippedModulesAlone pins the invariant the
-// pipeline recovered once [cascadeDependents] took over pinning.
+// TestApplyPipelineTagsAConsistentTree is the regression test for
+// the eidos failure this ordering exists to prevent.
 //
-// An earlier fix rewrote skipped modules' requires up front, before
-// the layer whose tags those requires name. That inverted the
-// pipeline's own rule — a go.mod is only rewritten once every
-// module it requires has been tagged and pushed — and `go mod tidy`
-// then went to the proxy for a revision no wave had created yet:
+// Every tag is a published artefact verified by CI at the commit it
+// names, so a tag placed on a tree where some module still requires
+// a superseded sibling fails that verification — and the tag cannot
+// be moved once the proxy has cached it. The pipeline therefore
+// propagates after the push, so the commit a layer leaves behind is
+// the commit the next layer tags, and it is consistent.
 //
-//	unknown revision backend/golang/v1.7.0
+// Asserts on git call order rather than the filesystem: the tree is
+// only inspectable in its final state, whereas the ordering of tag,
+// push and commit is what actually determines what each tag caught.
+func TestApplyPipelineTagsAConsistentTree(t *testing.T) {
+	t.Parallel()
+
+	root, mods, plan := twoModuleRepo(t)
+	runner := &gitFakeRunner{}
+	if err := ApplyPipeline(t.Context(), runner, root, io.Discard, mods, plan,
+		Options{AllowDirty: true, Message: "release"}); err != nil {
+		t.Fatalf("ApplyPipeline err: %v", err)
+	}
+
+	var order []string
+	for _, c := range runner.calls {
+		if c.name != "git" || len(c.args) == 0 {
+			continue
+		}
+		switch c.args[0] {
+		case "tag":
+			// `git tag -l` probes for an existing tag; only the
+			// creating form counts as an ordering event.
+			if !slices.Contains(c.args, "-l") {
+				order = append(order, "tag")
+			}
+		case "push", "commit":
+			order = append(order, c.args[0])
+		}
+	}
+
+	// Layer 1 tags and pushes the root, then propagates v0.2.0 into
+	// sub. Layer 2 tags sub off that commit and pushes; nothing
+	// requires sub, so it propagates nothing.
+	want := []string{"tag", "push", "commit", "tag", "push"}
+	if !slices.Equal(order, want) {
+		t.Fatalf("git order = %v, want %v", order, want)
+	}
+
+	// The invariant in one line: no commit may follow the final
+	// push, or it is a tree change no tag ever captured.
+	if order[len(order)-1] == "commit" {
+		t.Error("a propagation commit trails the last push, so no tag names it")
+	}
+}
+
+// TestApplyPipelineResumeNarrowsTheDirtyCheck pins what --resume
+// does and does not permit.
 //
-// A module that still reads as skipped by the time the pipeline
-// runs is one the cascade deliberately left alone, so it has no
-// requires to rewrite and the pipeline must not touch it.
-func TestApplyPipelineLeavesSkippedModulesAlone(t *testing.T) {
+// The value is entirely in the refusal. --allow-dirty already lets a
+// release start on any tree, which is how unrelated working-tree
+// edits ride into a tagged commit — unfixable once the proxy has
+// cached the tag. --resume exists to make continuing an interrupted
+// run safe without buying that, so it must reject a stray file even
+// while accepting the go.mods the interrupted run left behind.
+func TestApplyPipelineResumeNarrowsTheDirtyCheck(t *testing.T) {
+	t.Parallel()
+
+	// The fake reports a dirty tree; the second call, which lists
+	// the paths, decides whether the run may proceed.
+	newRunner := func(status string) *gitFakeRunner {
+		return &gitFakeRunner{perCallOutputs: []string{status, status}}
+	}
+	// sub, because that is a module twoModuleRepo actually declares:
+	// the allow-list is built from the workspace, so a go.mod outside
+	// it is stray however it is named.
+	dirtyMods := " M sub/go.mod\n M sub/go.sum\n"
+
+	t.Run("without --resume a dirty tree still aborts", func(t *testing.T) {
+		t.Parallel()
+		root, mods, plan := twoModuleRepo(t)
+		err := ApplyPipeline(t.Context(), newRunner(dirtyMods), root, io.Discard,
+			mods, plan, Options{Message: "release"})
+		if err == nil {
+			t.Fatal("ApplyPipeline = nil, want the cleanliness check to refuse")
+		}
+		if !strings.Contains(err.Error(), "--resume") {
+			t.Errorf("err = %v, want it to offer --resume", err)
+		}
+	})
+
+	t.Run("a stray file is refused even with --resume", func(t *testing.T) {
+		t.Parallel()
+		root, mods, plan := twoModuleRepo(t)
+		err := ApplyPipeline(t.Context(),
+			newRunner(dirtyMods+" M internal/thing.go\n"), root, io.Discard,
+			mods, plan, Options{Message: "release", Resume: true})
+		if err == nil {
+			t.Fatal("ApplyPipeline = nil, want the stray source file refused")
+		}
+		if !strings.Contains(err.Error(), "internal/thing.go") {
+			t.Errorf("err = %v, want it to name the offending path", err)
+		}
+		if strings.Contains(err.Error(), "sub/go.mod") {
+			t.Errorf("err = %v, want the go.mod files accepted, not reported", err)
+		}
+	})
+}
+
+// TestApplyPipelineResumesOwedPropagation pins the resume ordering.
+//
+// A run interrupted between its tag and its propagation commit
+// leaves that propagation owed. The re-run's plan sees the module
+// already tagged, reports it skipped, and seeds it as released — so
+// it never appears in a layer. Propagating at the end of a layer
+// would therefore tag the next layer onto the tree the interrupted
+// run failed to finish, publishing exactly the inconsistency the
+// ordering exists to prevent. Propagation runs first instead.
+func TestApplyPipelineResumesOwedPropagation(t *testing.T) {
+	t.Parallel()
+
+	root, mods, plan := twoModuleRepo(t)
+	// The state an interrupt after `git tag v0.2.0` leaves behind:
+	// the root is tagged, so this run infers no commits for it and
+	// skips it, while sub is still to be released and its go.mod
+	// still names the superseded root.
+	for i, e := range plan {
+		if e.Module.Dir == "." {
+			plan[i].Level = BumpNone
+			plan[i].OldVersion = "0.2.0"
+			plan[i].NewVersion = "0.2.0"
+			plan[i].Tag = ""
+			plan[i].Reason = "no commits in module scope"
+		}
+	}
+
+	runner := &gitFakeRunner{}
+	if err := ApplyPipeline(t.Context(), runner, root, io.Discard, mods, plan,
+		Options{AllowDirty: true, Message: "release"}); err != nil {
+		t.Fatalf("ApplyPipeline err: %v", err)
+	}
+
+	var order []string
+	for _, c := range runner.calls {
+		if c.name != "git" || len(c.args) == 0 {
+			continue
+		}
+		switch c.args[0] {
+		case "tag":
+			if !slices.Contains(c.args, "-l") {
+				order = append(order, "tag")
+			}
+		case "push", "commit":
+			order = append(order, c.args[0])
+		}
+	}
+
+	// The owed commit lands before sub is tagged, not after.
+	if want := []string{"commit", "tag", "push"}; !slices.Equal(order, want) {
+		t.Fatalf("git order = %v, want %v — the owed propagation must "+
+			"precede the next tag", order, want)
+	}
+
+	got, err := os.ReadFile(filepath.Join(root, "sub", "go.mod"))
+	if err != nil {
+		t.Fatalf("read sub/go.mod: %v", err)
+	}
+	if !strings.Contains(string(got), "v0.2.0") {
+		t.Errorf("sub/go.mod = %q, want the interrupted run's version propagated", got)
+	}
+}
+
+// TestApplyPipelinePinsSkippedModulesWithoutTagging pins the rule
+// that keeps the workspace consistent at every tag.
+//
+// A skipped module is not tagged — nothing about it changed — but it
+// still requires its siblings, and those siblings move. Leaving it
+// alone is what broke an eidos release: seven modules that replace a
+// sibling locally read that sibling's go.mod off disk, so the moment
+// one module was pinned they all disagreed with it, and every
+// subsequent tag pointed at a commit where `go mod tidy` rewrote
+// seven go.mods. The tags were fine; the tree they named was not.
+//
+// So the pipeline writes to skipped modules and does not tag them.
+// Under the default cascade a module with pins is promoted and does
+// get a tag; this is the --no-cascade shape, where the operator has
+// asked for the pin without the version bump.
+func TestApplyPipelinePinsSkippedModulesWithoutTagging(t *testing.T) {
 	t.Parallel()
 
 	root, mods, plan := threeModuleRepo(t)
-	before, err := os.ReadFile(filepath.Join(root, "leaf", "go.mod"))
-	if err != nil {
-		t.Fatalf("read leaf/go.mod: %v", err)
-	}
 	runner := &gitFakeRunner{}
 
 	if runErr := ApplyPipeline(t.Context(), runner, root, io.Discard, mods, plan,
@@ -182,22 +354,28 @@ func TestApplyPipelineLeavesSkippedModulesAlone(t *testing.T) {
 
 	after, err := os.ReadFile(filepath.Join(root, "leaf", "go.mod"))
 	if err != nil {
-		t.Fatalf("re-read leaf/go.mod: %v", err)
+		t.Fatalf("read leaf/go.mod: %v", err)
 	}
-	if string(after) != string(before) {
-		t.Errorf("leaf/go.mod was rewritten:\n%s", after)
+	if strings.Contains(string(after), "v0.1.0") {
+		t.Errorf("leaf/go.mod still names the superseded version:\n%s", after)
 	}
+
+	// Written to, but never tagged: the version did not move.
 	for _, tag := range tagNamesFrom(runner) {
 		if strings.HasPrefix(tag, "leaf/") {
 			t.Errorf("tags = %v, want none for the skipped module", tagNamesFrom(runner))
 		}
 	}
+	staged := false
 	for _, c := range runner.calls {
 		stagedLeaf := c.name == "git" && len(c.args) > 0 &&
 			c.args[0] == "add" && slices.Contains(c.args, "leaf/go.mod")
 		if stagedLeaf {
-			t.Errorf("calls = %+v, want leaf/go.mod never staged", c.args)
+			staged = true
 		}
+	}
+	if !staged {
+		t.Error("leaf/go.mod was never staged, want its pin committed")
 	}
 }
 
@@ -286,7 +464,10 @@ func TestApplyPipelineFailureNamesLayer(t *testing.T) {
 		if err == nil {
 			t.Fatal("ApplyPipeline returned nil, want the commit failure")
 		}
-		for _, want := range []string{"sub/v0.1.1", "commit", "re-run"} {
+		// v0.2.0, not sub/v0.1.1: the commit that fails belongs to
+		// the layer that published v0.2.0, since propagation now
+		// follows the push rather than preceding the tag.
+		for _, want := range []string{"v0.2.0", "commit", "re-run"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("err = %v, want it to carry %q", err, want)
 			}

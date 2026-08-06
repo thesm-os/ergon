@@ -483,7 +483,7 @@ func printPlan(w io.Writer, waves [][]PlanEntry) {
 
 	if grouped {
 		fmt.Fprintf(w,
-			"\n  Each wave: rewrite go.mod → tidy → one commit → tag → push.\n"+
+			"\n  Each wave: tag → push → pin dependents → tidy → one commit.\n"+
 				"  %d pin(s); %d tag, %d commit and %d push signature(s).\n",
 			pins, tags, commits, len(waves))
 	}
