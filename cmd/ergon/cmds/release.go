@@ -29,6 +29,7 @@ var releaseFlags struct {
 	noBump     bool
 	noPush     bool
 	allowDirty bool
+	noCascade  bool
 }
 
 // releasePreflight rejects a release whose generated pin-commit
@@ -96,6 +97,7 @@ var releaseCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		opts.NoCascade = releaseFlags.noCascade
 		// release.Modules, when set, replaces the global module
 		// list for `ergon release` only — other subcommands keep
 		// using cfg.Modules. Empty falls through to the global
@@ -140,5 +142,8 @@ func init() {
 		"Keep tags and commits local; implies --no-bump (tidy needs published tags to resolve)")
 	releaseCmd.Flags().BoolVar(&releaseFlags.allowDirty, "allow-dirty", false,
 		"Permit uncommitted changes in the working tree (default: error out so the release commit stays clean)")
+	releaseCmd.Flags().BoolVar(&releaseFlags.noCascade, "no-cascade", false,
+		"Do not release a module whose only change is a sibling it requires moving "+
+			"(default: patch-release it, so the rewritten go.mod reaches consumers)")
 	rootCmd.AddCommand(releaseCmd)
 }

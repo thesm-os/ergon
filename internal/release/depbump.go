@@ -98,7 +98,10 @@ func ApplyPipeline(
 	if err != nil {
 		return err
 	}
-	_ = mods
+	ownPaths, err := workspaceModulePaths(root, mods)
+	if err != nil {
+		return err
+	}
 
 	// Skipped entries are considered already-resolved so they do
 	// not block dependents from advancing through the topology.
@@ -106,44 +109,6 @@ func ApplyPipeline(
 	for _, e := range plan {
 		if e.Skipped() {
 			released[e.Module.Dir] = true
-		}
-	}
-
-	// A skipped module's own requires are rewritten once, up front,
-	// against the finished plan.
-	//
-	// layerReady drops skipped entries before they can reach a
-	// layer, so bumpOwnRequires — which iterates that layer — never
-	// opened their go.mod files. A module skipped for having no
-	// commits still depends on the ones that moved, so it kept
-	// requiring superseded versions. Where the workspace resolves
-	// siblings through local replace directives, `go mod tidy` then
-	// raises those requirements from local content: the tree is
-	// dirty the moment the release finishes and the mod stage of
-	// the gate fails.
-	//
-	// Up front, not after the loop drains, because the release
-	// workflow verifies at the tagged commit. A repair commit made
-	// after tagging leaves every tag carrying the stale go.mod, the
-	// gate keeps failing at all of them, and no release record is
-	// ever created — while the tags are pushed and the proxy has
-	// cached them immutably. The values are knowable this early:
-	// versions is complete before the first tag, so `released` is
-	// passed as fully-resolved rather than reflecting progress.
-	var pendingSkipped []string
-	if !opts.NoBump {
-		resolved := map[string]bool{}
-		var skippedDirs []string
-		for _, e := range plan {
-			resolved[e.Module.Dir] = true
-			if e.Skipped() {
-				skippedDirs = append(skippedDirs, e.Module.Dir)
-			}
-		}
-		var bumpErr error
-		pendingSkipped, bumpErr = bumpOwnRequires(root, skippedDirs, versions, resolved)
-		if bumpErr != nil {
-			return bumpErr
 		}
 	}
 
@@ -179,13 +144,6 @@ func ApplyPipeline(
 				return err
 			}
 		}
-		// Fold the skipped modules into the first layer that commits,
-		// so their go.mod files are in the tree every tag points at.
-		if len(pendingSkipped) > 0 {
-			bumped = append(bumped, pendingSkipped...)
-			sort.Strings(bumped)
-			pendingSkipped = nil
-		}
 		if len(bumped) > 0 {
 			// Tidy is gated on push-mode because it needs the
 			// prior-layer tags resolvable through the proxy or
@@ -193,7 +151,7 @@ func ApplyPipeline(
 			// exist locally, so we skip tidy and let go.sum
 			// stay stale until the user runs tidy after pushing.
 			if !opts.NoPush {
-				if err := tidyModules(ctx, runner, root, bumped); err != nil {
+				if err := tidyModules(ctx, runner, root, bumped, ownPaths); err != nil {
 					return err
 				}
 			}
@@ -276,11 +234,15 @@ func pushFollowTags(ctx context.Context, runner xexec.Runner, root string) error
 // rewritten require lines reach go.sum. Called only after the
 // prior-layer tags have been pushed; otherwise tidy fails to
 // resolve them through the proxy or direct git fetch.
-func tidyModules(ctx context.Context, runner xexec.Runner, root string, dirs []string) error {
+func tidyModules(
+	ctx context.Context, runner xexec.Runner, root string,
+	dirs, ownPaths []string,
+) error {
+	env := directFetchEnv(ownPaths)
 	for _, d := range dirs {
 		var buf bytes.Buffer
 		err := runner.Run(ctx,
-			xexec.Options{Dir: filepath.Join(root, d), Stdout: &buf, Stderr: &buf},
+			xexec.Options{Dir: filepath.Join(root, d), Env: env, Stdout: &buf, Stderr: &buf},
 			"go", "mod", "tidy")
 		if err != nil {
 			return fmt.Errorf("go mod tidy in %s: %w: %s",
@@ -288,6 +250,68 @@ func tidyModules(ctx context.Context, runner xexec.Runner, root string, dirs []s
 		}
 	}
 	return nil
+}
+
+// workspaceModulePaths returns the import path of every module in
+// the workspace, in module order.
+func workspaceModulePaths(root string, mods []modules.Module) ([]string, error) {
+	out := make([]string, 0, len(mods))
+	for _, m := range mods {
+		ip, err := readModulePath(filepath.Join(root, m.Dir, "go.mod"))
+		if err != nil {
+			return nil, fmt.Errorf("workspaceModulePaths: %s: %w", m.Dir, err)
+		}
+		out = append(out, ip)
+	}
+	return out, nil
+}
+
+// directFetchEnv makes `go mod tidy` resolve the workspace's own
+// modules straight from their VCS origin, bypassing the module proxy
+// and the checksum database for those paths only.
+//
+// The release pushes a tag and then, moments later, asks the Go
+// toolchain to resolve it. Routed through proxy.golang.org that is a
+// race against a third-party cache, and a lost one is not merely a
+// delay: the proxy caches negative lookups, so an earlier attempt
+// that asked for the version before it existed — precisely what a
+// release that failed partway through does — leaves an "unknown
+// revision" entry that outlives the push. An eidos release died this
+// way on backend/golang@v1.7.0 while its same-second sibling
+// frontend/protobuf@v1.5.2 resolved fine; the difference was that
+// only the former had been requested by the previous failed run.
+//
+// Retrying would work eventually, since the entry does expire, but
+// its lifetime belongs to a service ergon does not operate. Fetching
+// from the origin removes the dependency rather than waiting on it:
+// git has the tag, because ergon pushed it there and the push
+// returned success before this ran.
+//
+// Scoped to the workspace's own paths. Third-party dependencies keep
+// proxy caching and checksum-database verification, which is what
+// makes skipping verification here defensible: these modules are
+// ones this very process just created and pushed.
+//
+// Returns nil for an empty list so the child environment is left
+// untouched rather than being handed empty overrides.
+func directFetchEnv(ownPaths []string) []string {
+	if len(ownPaths) == 0 {
+		return nil
+	}
+	own := strings.Join(ownPaths, ",")
+	out := make([]string, 0, 2)
+	// Prepended to any value already set rather than replacing it: an
+	// operator with private modules of their own has GONOPROXY
+	// configured for them, and clobbering it would silently route
+	// their private code through the public proxy.
+	for _, key := range []string{"GONOPROXY", "GONOSUMDB"} {
+		value := own
+		if prior := os.Getenv(key); prior != "" {
+			value = prior + "," + own
+		}
+		out = append(out, key+"="+value)
+	}
+	return out
 }
 
 // HEADIsDirty reports whether the working tree at root has

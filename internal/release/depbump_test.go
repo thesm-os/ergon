@@ -284,7 +284,10 @@ func TestTidyModules(t *testing.T) {
 	t.Run("runs go mod tidy in each module dir in order", func(t *testing.T) {
 		t.Parallel()
 		runner := &planFakeRunner{}
-		if err := tidyModules(t.Context(), runner, "/repo", []string{"cli", "frontend/golang"}); err != nil {
+		if err := tidyModules(
+			t.Context(), runner, "/repo",
+			[]string{"cli", "frontend/golang"}, nil,
+		); err != nil {
 			t.Fatalf("tidyModules err: %v", err)
 		}
 		if len(runner.calls) != 2 {
@@ -298,10 +301,42 @@ func TestTidyModules(t *testing.T) {
 		}
 	})
 
+	t.Run("own modules resolve from git, not the public proxy", func(t *testing.T) {
+		t.Parallel()
+		runner := &planFakeRunner{}
+		own := []string{"example.test/proj", "example.test/proj/cli"}
+		if err := tidyModules(t.Context(), runner, "/repo", []string{"cli"}, own); err != nil {
+			t.Fatalf("tidyModules err: %v", err)
+		}
+		if len(runner.calls) != 1 {
+			t.Fatalf("calls = %d, want 1", len(runner.calls))
+		}
+		// Both variables, because the proxy supplies the version
+		// listing and the sumdb verifies the download: leaving
+		// either pointed at the public service reintroduces the
+		// dependency on a cache observing a seconds-old tag.
+		got := strings.Join(runner.calls[0].env, " ")
+		for _, want := range []string{
+			"GONOPROXY=example.test/proj,example.test/proj/cli",
+			"GONOSUMDB=example.test/proj,example.test/proj/cli",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("env = %q, want it to contain %q", got, want)
+			}
+		}
+	})
+
+	t.Run("no workspace paths leaves the environment untouched", func(t *testing.T) {
+		t.Parallel()
+		if env := directFetchEnv(nil); env != nil {
+			t.Errorf("directFetchEnv(nil) = %v, want nil", env)
+		}
+	})
+
 	t.Run("first failure surfaces wrapped with the module dir", func(t *testing.T) {
 		t.Parallel()
 		runner := &planFakeRunner{output: "go: cannot find module", runErr: errors.New("exit 1")}
-		err := tidyModules(t.Context(), runner, "/repo", []string{"cli"})
+		err := tidyModules(t.Context(), runner, "/repo", []string{"cli"}, nil)
 		if err == nil {
 			t.Fatal("tidyModules err = nil, want non-nil")
 		}
@@ -312,6 +347,46 @@ func TestTidyModules(t *testing.T) {
 			t.Errorf("err = %v, want it to wrap the captured stderr", err)
 		}
 	})
+}
+
+// TestWorkspaceModulePathsMissingGoMod pins that a module absent
+// from disk is reported rather than silently omitted.
+//
+// The result scopes which paths bypass the proxy. A module dropped
+// from that list would be resolved through proxy.golang.org, which
+// is exactly the dependency on a third-party cache the list exists
+// to remove — and it would fail only sometimes.
+func TestWorkspaceModulePathsMissingGoMod(t *testing.T) {
+	t.Parallel()
+
+	_, err := workspaceModulePaths(t.TempDir(), []modules.Module{{Dir: "gone"}})
+	if err == nil {
+		t.Error("workspaceModulePaths = nil, want the missing go.mod reported")
+	}
+}
+
+// TestDirectFetchEnvPreservesOperatorConfig pins that ergon extends
+// an operator's GONOPROXY rather than replacing it.
+//
+// Top-level and not parallel because t.Setenv forbids parallelism
+// and the surrounding TestTidyModules is parallel. It earns its own
+// test rather than being dropped: an operator with GONOPROXY set for
+// their own private modules would, on a clobber, have that code
+// silently routed through the public proxy by a release — a
+// disclosure no other assertion here would catch.
+func TestDirectFetchEnvPreservesOperatorConfig(t *testing.T) {
+	t.Setenv("GONOPROXY", "corp.example/internal")
+	t.Setenv("GONOSUMDB", "corp.example/internal")
+
+	got := strings.Join(directFetchEnv([]string{"example.test/proj"}), " ")
+	for _, want := range []string{
+		"GONOPROXY=corp.example/internal,example.test/proj",
+		"GONOSUMDB=corp.example/internal,example.test/proj",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("env = %q, want it to contain %q", got, want)
+		}
+	}
 }
 
 // TestBumpedPaths pins the go.mod + (conditional) go.sum

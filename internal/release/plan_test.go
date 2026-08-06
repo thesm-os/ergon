@@ -335,9 +335,9 @@ func TestPrintPlan(t *testing.T) {
 	t.Run("skipped entry renders `(skip)`", func(t *testing.T) {
 		t.Parallel()
 		var buf strings.Builder
-		printPlan(&buf, []PlanEntry{{
+		printPlan(&buf, [][]PlanEntry{{{
 			Module: modules.Module{Dir: "cli"}, OldVersion: "0.1.0", Reason: "no commits",
-		}})
+		}}})
 		out := buf.String()
 		if !strings.Contains(out, "(skip)") {
 			t.Fatalf("output missing (skip): %q", out)
@@ -347,11 +347,11 @@ func TestPrintPlan(t *testing.T) {
 	t.Run("full entry renders the OLD -> NEW tag form", func(t *testing.T) {
 		t.Parallel()
 		var buf strings.Builder
-		printPlan(&buf, []PlanEntry{{
+		printPlan(&buf, [][]PlanEntry{{{
 			Module:     modules.Module{Dir: "cli"},
 			OldVersion: "0.1.0", NewVersion: "0.2.0",
 			Tag: "cli/v0.2.0", Reason: "feat",
-		}})
+		}}})
 		out := buf.String()
 		for _, want := range []string{"0.1.0", "0.2.0", "cli/v0.2.0", "feat"} {
 			if !strings.Contains(out, want) {
@@ -460,7 +460,11 @@ type planFakeRunner struct {
 func (f *planFakeRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
 	f.mu.Lock()
 	idx := len(f.calls)
-	f.calls = append(f.calls, gitCall{name: name, args: append([]string(nil), args...)})
+	f.calls = append(f.calls, gitCall{
+		name: name,
+		args: append([]string(nil), args...),
+		env:  append([]string(nil), opts.Env...),
+	})
 	body := f.output
 	if idx < len(f.perCallOutputs) {
 		body = f.perCallOutputs[idx]
@@ -629,12 +633,9 @@ func TestPrintPlanDistinguishesPinFromSkip(t *testing.T) {
 	}
 
 	var out strings.Builder
-	printPlan(&out, plan)
+	printPlan(&out, [][]PlanEntry{plan})
 	got := out.String()
 
-	if !strings.Contains(got, "(pin only)") {
-		t.Errorf("output = %q, want the pinned module flagged", got)
-	}
 	for _, want := range []string{
 		"example.test/proj", "v0.1.0 -> v0.2.0",
 		"example.test/proj/mid", "v0.1.0 -> v0.1.1",
@@ -655,6 +656,51 @@ func TestPrintPlanDistinguishesPinFromSkip(t *testing.T) {
 	}
 }
 
+// TestPrintPlanGroupsWaves pins the grouped rendering. The waves are
+// the execution order and therefore the signing order: one commit,
+// N tags and one push each, every one of which can block on a
+// hardware key. Printed flat, a ten-module release is an
+// unattributable run of PIN prompts.
+func TestPrintPlanGroupsWaves(t *testing.T) {
+	t.Parallel()
+
+	waves := [][]PlanEntry{
+		{{
+			Module: modules.Module{Dir: "."}, Level: BumpMinor,
+			OldVersion: "0.1.0", NewVersion: "0.2.0", Tag: "v0.2.0", Reason: "feat",
+		}},
+		{{
+			Module: modules.Module{Dir: "mid"}, Level: BumpPatch,
+			OldVersion: "0.1.0", NewVersion: "0.1.1", Tag: "mid/v0.1.1", Reason: "dep moved",
+			Pins: []Pin{{Path: "example.test/proj", From: "v0.1.0", To: "v0.2.0"}},
+		}},
+	}
+
+	var out strings.Builder
+	printPlan(&out, waves)
+	got := out.String()
+
+	for _, want := range []string{
+		"2 modules in 2 waves, 2 tags",
+		"wave 1", "nothing published yet",
+		"wave 2", "after wave 1 is pushed",
+		"pin  example.test/proj",
+		"signature",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output = %q, want it to contain %q", got, want)
+		}
+	}
+
+	// A single wave keeps the flat listing — wave headings are
+	// ceremony on a single-module repository.
+	var flat strings.Builder
+	printPlan(&flat, waves[:1])
+	if strings.Contains(flat.String(), "wave 1") {
+		t.Errorf("single-wave output = %q, want no wave heading", flat.String())
+	}
+}
+
 // TestPrintPlanAligns guards the column layout. The skip branch used
 // a literal run of spaces where the tagged branch used a width, so
 // the reason column sat under the tag column and a ten-module plan
@@ -663,7 +709,7 @@ func TestPrintPlanAligns(t *testing.T) {
 	t.Parallel()
 
 	var out strings.Builder
-	printPlan(&out, []PlanEntry{
+	printPlan(&out, [][]PlanEntry{{
 		{
 			Module: modules.Module{Dir: "."}, Level: BumpMinor,
 			OldVersion: "0.1.0", NewVersion: "0.2.0", Tag: "v0.2.0", Reason: "feat",
@@ -672,7 +718,7 @@ func TestPrintPlanAligns(t *testing.T) {
 			Module: modules.Module{Dir: "leaf"}, Level: BumpNone,
 			OldVersion: "0.1.0", NewVersion: "0.1.0", Reason: "no commits",
 		},
-	})
+	}})
 
 	var starts []int
 	for line := range strings.SplitSeq(strings.TrimSpace(out.String()), "\n") {
@@ -686,6 +732,317 @@ func TestPrintPlanAligns(t *testing.T) {
 	if starts[0] != starts[1] {
 		t.Errorf("arrow columns at %v, want them aligned", starts)
 	}
+}
+
+// cascadeRepo builds root <- mid <- leaf plus an unrelated module,
+// so the fixture covers a direct dependent, a transitive one, and a
+// module that genuinely has nothing to do.
+func cascadeRepo(t *testing.T) (string, []modules.Module, []PlanEntry) {
+	t.Helper()
+	root := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", rel, err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	write("go.mod", "module example.test/proj\n\ngo 1.26\n")
+	write("mid/go.mod", "module example.test/proj/mid\n\ngo 1.26\n\n"+
+		"require example.test/proj v0.1.0\n")
+	write("leaf/go.mod", "module example.test/proj/leaf\n\ngo 1.26\n\n"+
+		"require example.test/proj/mid v0.1.0\n")
+	write("lonely/go.mod", "module example.test/proj/lonely\n\ngo 1.26\n")
+
+	mods := []modules.Module{{Dir: "."}, {Dir: "mid"}, {Dir: "leaf"}, {Dir: "lonely"}}
+	plan := []PlanEntry{
+		{
+			Module: modules.Module{Dir: "."}, Level: BumpMinor,
+			OldVersion: "0.1.0", NewVersion: "0.2.0", Tag: "v0.2.0", Reason: "feat",
+		},
+		{
+			Module: modules.Module{Dir: "mid"}, Level: BumpNone,
+			OldVersion: "0.1.0", NewVersion: "0.1.0", Reason: "no commits in module scope",
+		},
+		{
+			Module: modules.Module{Dir: "leaf"}, Level: BumpNone,
+			OldVersion: "0.4.0", NewVersion: "0.4.0", Reason: "no commits in module scope",
+		},
+		{
+			Module: modules.Module{Dir: "lonely"}, Level: BumpNone,
+			OldVersion: "0.3.0", NewVersion: "0.3.0", Reason: "no commits in module scope",
+		},
+	}
+	return root, mods, plan
+}
+
+// TestPlanWaves pins the grouping the printed plan and the apply
+// pipeline must agree on.
+//
+// The waves are the signing order, so a plan that groups differently
+// from what ApplyPipeline executes would mis-state how many hardware
+// key prompts are coming and what each authorises — worse than not
+// grouping at all, because it reads as authoritative.
+func TestPlanWaves(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a module waits for everything it requires", func(t *testing.T) {
+		t.Parallel()
+		root, mods, plan := cascadeRepo(t)
+
+		waves, err := planWaves(root, mods, plan)
+		if err != nil {
+			t.Fatalf("planWaves: %v", err)
+		}
+
+		got := make([][]string, 0, len(waves))
+		for _, w := range waves {
+			dirs := make([]string, 0, len(w))
+			for _, e := range w {
+				dirs = append(dirs, e.Module.Dir)
+			}
+			got = append(got, dirs)
+		}
+
+		// root and lonely depend on nothing, so they go first; mid
+		// requires root, leaf requires mid.
+		want := [][]string{{".", "lonely"}, {"mid"}, {"leaf"}}
+		if len(got) != len(want) {
+			t.Fatalf("waves = %v, want %v", got, want)
+		}
+		for i := range want {
+			if !slices.Equal(got[i], want[i]) {
+				t.Errorf("wave %d = %v, want %v", i+1, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("a lone module is a single wave and reads no go.mod", func(t *testing.T) {
+		t.Parallel()
+		// An empty root: reaching the dependency graph at all would
+		// fail here, which is what proves the short-circuit.
+		waves, err := planWaves(t.TempDir(), nil, []PlanEntry{{
+			Module: modules.Module{Dir: "."}, Level: BumpMinor,
+			OldVersion: "0.1.0", NewVersion: "0.2.0", Tag: "v0.2.0",
+		}})
+		if err != nil {
+			t.Fatalf("planWaves: %v", err)
+		}
+		if len(waves) != 1 || len(waves[0]) != 1 {
+			t.Fatalf("waves = %v, want one wave of one entry", waves)
+		}
+	})
+
+	t.Run("a cycle degrades to one wave instead of failing", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		write := func(rel, body string) {
+			t.Helper()
+			p := filepath.Join(root, rel)
+			if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+				t.Fatalf("mkdir %s: %v", rel, err)
+			}
+			if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+				t.Fatalf("write %s: %v", rel, err)
+			}
+		}
+		write("a/go.mod", "module example.test/a\n\ngo 1.26\n\n"+
+			"require example.test/b v0.1.0\n")
+		write("b/go.mod", "module example.test/b\n\ngo 1.26\n\n"+
+			"require example.test/a v0.1.0\n")
+
+		mods := []modules.Module{{Dir: "a"}, {Dir: "b"}}
+		plan := []PlanEntry{
+			{Module: modules.Module{Dir: "a"}, OldVersion: "0.1.0", NewVersion: "0.1.1", Tag: "a/v0.1.1"},
+			{Module: modules.Module{Dir: "b"}, OldVersion: "0.1.0", NewVersion: "0.1.1", Tag: "b/v0.1.1"},
+		}
+
+		// ApplyPipeline reports the cycle with a usable message; the
+		// plan's job is to stay printable, not to duplicate that
+		// diagnosis or hide the entries behind an error.
+		waves, err := planWaves(root, mods, plan)
+		if err != nil {
+			t.Fatalf("planWaves on a cycle = %v, want the entries ungrouped", err)
+		}
+		if len(waves) != 1 || len(waves[0]) != 2 {
+			t.Errorf("waves = %v, want a single wave holding both entries", waves)
+		}
+	})
+
+	t.Run("an unreadable go.mod surfaces", func(t *testing.T) {
+		t.Parallel()
+		_, err := planWaves(t.TempDir(),
+			[]modules.Module{{Dir: "a"}, {Dir: "b"}},
+			[]PlanEntry{
+				{Module: modules.Module{Dir: "a"}, OldVersion: "0.1.0", NewVersion: "0.1.1"},
+				{Module: modules.Module{Dir: "b"}, OldVersion: "0.1.0", NewVersion: "0.1.1"},
+			})
+		if err == nil {
+			t.Error("planWaves = nil, want the missing go.mod reported")
+		}
+	})
+}
+
+// TestCascadeDependentsPropagatesErrors pins that neither failure on
+// the promotion path is swallowed.
+//
+// The cascade decides which modules get tagged. A read or parse
+// failure that returned silently would drop a module from the plan
+// rather than failing the release, which is the quiet form of the
+// bug the cascade exists to fix.
+func TestCascadeDependentsPropagatesErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an unreadable go.mod fails the pin computation", func(t *testing.T) {
+		t.Parallel()
+		_, err := cascadeDependents(t.TempDir(), []PlanEntry{
+			{
+				Module: modules.Module{Dir: "."}, Level: BumpMinor,
+				OldVersion: "0.1.0", NewVersion: "0.2.0", Tag: "v0.2.0",
+			},
+			{
+				Module: modules.Module{Dir: "gone"}, Level: BumpNone,
+				OldVersion: "0.1.0", NewVersion: "0.1.0", Reason: "no commits",
+			},
+		})
+		if err == nil {
+			t.Error("cascadeDependents = nil, want the read failure reported")
+		}
+	})
+
+	t.Run("an unparseable current version fails the bump", func(t *testing.T) {
+		t.Parallel()
+		root, _, plan := cascadeRepo(t)
+		// mid requires the root at v0.1.0 while the root moves to
+		// v0.2.0, so mid has a pin and reaches the bump — which then
+		// has no valid version to advance from.
+		for i, e := range plan {
+			if e.Module.Dir == "mid" {
+				plan[i].OldVersion = "not-a-semver"
+			}
+		}
+		if _, err := cascadeDependents(root, plan); err == nil {
+			t.Error("cascadeDependents = nil, want the bump failure reported")
+		}
+	})
+}
+
+// TestCascadeDependentsPromotesOnStalePins pins the resume case.
+//
+// The first cascade rule asked whether a dependency moved *in this
+// plan*. On a resumed release it had moved in the previous run, so
+// nothing triggered: a module with a stale require was left skipped,
+// its go.mod rewritten and committed, and no tag cut to carry the
+// rewrite. That is the untagged-go.mod bug the cascade exists to
+// prevent, returning through the recovery path.
+//
+// The rule is therefore "has pins", not "a dependency moved": if the
+// release will rewrite a module's requires, the release must tag it,
+// whichever run moved the dependency.
+func TestCascadeDependentsPromotesOnStalePins(t *testing.T) {
+	t.Parallel()
+
+	root, _, plan := cascadeRepo(t)
+
+	// Stand the root down to "already released, nothing new" — at
+	// 0.2.0, the version a previous run tagged and pushed before it
+	// died. It no longer moves in this plan, so the old rule saw no
+	// trigger; but mid/go.mod still requires v0.1.0, so the release
+	// will still rewrite it and must still tag the result.
+	for i, e := range plan {
+		if e.Module.Dir == "." {
+			plan[i].Level = BumpNone
+			plan[i].OldVersion = "0.2.0"
+			plan[i].NewVersion = "0.2.0"
+			plan[i].Tag = ""
+			plan[i].Reason = "no commits in module scope"
+		}
+	}
+
+	got, err := cascadeDependents(root, plan)
+	if err != nil {
+		t.Fatalf("cascadeDependents: %v", err)
+	}
+
+	for _, e := range got {
+		if e.Module.Dir != "mid" {
+			continue
+		}
+		if e.Skipped() {
+			t.Fatalf("mid = skipped, want it promoted: its go.mod is "+
+				"rewritten by this release, so a tag must carry the rewrite "+
+				"(reason %q)", e.Reason)
+		}
+		if e.Level != BumpPatch {
+			t.Errorf("mid level = %v, want a patch bump", e.Level)
+		}
+	}
+}
+
+// TestCascadeDependents pins the rule that makes a dependency bump
+// consumable.
+//
+// Rewriting a skipped module's requires and committing without
+// tagging leaves the published module pointing at superseded
+// siblings: `go get <mod>@latest` returns the old tag, whose go.mod
+// still names versions the workspace has moved past. The rewrite
+// only reaches a consumer once it is tagged.
+func TestCascadeDependents(t *testing.T) {
+	t.Parallel()
+
+	root, _, plan := cascadeRepo(t)
+	got, err := cascadeDependents(root, plan)
+	if err != nil {
+		t.Fatalf("cascadeDependents: %v", err)
+	}
+
+	by := map[string]PlanEntry{}
+	for _, e := range got {
+		by[e.Module.Dir] = e
+	}
+
+	t.Run("a direct dependent is promoted to patch", func(t *testing.T) {
+		t.Parallel()
+		if by["mid"].NewVersion != "0.1.1" || by["mid"].Tag != "mid/v0.1.1" {
+			t.Errorf("mid = %+v, want 0.1.1 tagged mid/v0.1.1", by["mid"])
+		}
+		if by["mid"].Skipped() {
+			t.Error("mid still reads as skipped; it must be released to be consumable")
+		}
+	})
+
+	t.Run("promotion is transitive", func(t *testing.T) {
+		t.Parallel()
+		// leaf requires mid, which had no version change until the
+		// pass above gave it one.
+		if by["leaf"].NewVersion != "0.4.1" || by["leaf"].Tag != "leaf/v0.4.1" {
+			t.Errorf("leaf = %+v, want 0.4.1 tagged leaf/v0.4.1", by["leaf"])
+		}
+	})
+
+	t.Run("an unrelated module stays skipped", func(t *testing.T) {
+		t.Parallel()
+		if !by["lonely"].Skipped() {
+			t.Errorf("lonely = %+v, want it left alone", by["lonely"])
+		}
+	})
+
+	t.Run("the reason names the dependency that caused it", func(t *testing.T) {
+		t.Parallel()
+		if !strings.Contains(by["mid"].Reason, "example.test/proj") {
+			t.Errorf("mid reason = %q, want the triggering dependency named", by["mid"].Reason)
+		}
+	})
+
+	t.Run("a module with its own bump keeps its level", func(t *testing.T) {
+		t.Parallel()
+		if by["."].Level != BumpMinor || by["."].NewVersion != "0.2.0" {
+			t.Errorf("root = %+v, want its own minor preserved", by["."])
+		}
+	})
 }
 
 // TestPinChangesErrors pins the failure paths of the read the plan
@@ -739,10 +1096,19 @@ func TestAnnotatePinsPropagatesErrors(t *testing.T) {
 
 	t.Run("a module missing from disk fails the version map", func(t *testing.T) {
 		t.Parallel()
-		_, err := annotatePins(t.TempDir(), []PlanEntry{{
-			Module: modules.Module{Dir: "gone"}, Level: BumpNone,
-			OldVersion: "0.1.0", NewVersion: "0.1.0", Reason: "no commits",
-		}})
+		// Two entries: a lone module has no sibling to require, so
+		// annotatePins short-circuits before reading anything and
+		// there is no failure to propagate.
+		_, err := annotatePins(t.TempDir(), []PlanEntry{
+			{
+				Module: modules.Module{Dir: "."}, Level: BumpMinor,
+				OldVersion: "0.1.0", NewVersion: "0.2.0", Tag: "v0.2.0", Reason: "feat",
+			},
+			{
+				Module: modules.Module{Dir: "gone"}, Level: BumpNone,
+				OldVersion: "0.1.0", NewVersion: "0.1.0", Reason: "no commits",
+			},
+		})
 		if err == nil {
 			t.Fatal("annotatePins = nil, want the version-map failure propagated")
 		}

@@ -63,6 +63,23 @@ type Options struct {
 	// are doing.
 	AllowDirty bool
 
+	// NoCascade leaves a module out of the release when its only
+	// change is a sibling it requires moving.
+	//
+	// The default releases it. Rewriting a module's requires
+	// without tagging leaves the published module pointing at
+	// superseded siblings — `go get <mod>@latest` returns the old
+	// tag, whose go.mod still names versions the workspace has left
+	// behind — so the rewrite is only consumable once tagged.
+	//
+	// Set it when version churn matters more than that coherence:
+	// one root fix otherwise patches every dependent.
+	//
+	// Not resolved by [NewOptions], which exists to referee the
+	// force / --bump / --version interactions. This flag has none,
+	// so the cobra layer sets it directly.
+	NoCascade bool
+
 	// Version, when non-empty, overrides every module's bump
 	// resolution and pins every non-skipped module to this exact
 	// version. Useful for two cases the bump-inference path

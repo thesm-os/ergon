@@ -151,72 +151,53 @@ func threeModuleRepo(t *testing.T) (root string, mods []modules.Module, plan []P
 	return root, mods, plan
 }
 
-// TestApplyPipelinePinsSkippedModules covers the direction the
-// version map alone does not fix.
+// TestApplyPipelineLeavesSkippedModulesAlone pins the invariant the
+// pipeline recovered once [cascadeDependents] took over pinning.
 //
-// A skipped module keeps requiring the versions its siblings sat on
-// before the release. Where the workspace resolves siblings through
-// local replace directives, `go mod tidy` then raises those
-// requirements from local content, so the tree is dirty the moment
-// the release finishes and the mod stage of the gate fails.
+// An earlier fix rewrote skipped modules' requires up front, before
+// the layer whose tags those requires name. That inverted the
+// pipeline's own rule — a go.mod is only rewritten once every
+// module it requires has been tagged and pushed — and `go mod tidy`
+// then went to the proxy for a revision no wave had created yet:
 //
-// The rewrite has to land before the FIRST tag, not after the last.
-// The release workflow verifies at the tagged commit, so a repair
-// commit made after tagging leaves every tag still carrying the
-// stale go.mod — the gate keeps failing at all of them and no
-// release record is ever created.
-func TestApplyPipelinePinsSkippedModules(t *testing.T) {
+//	unknown revision backend/golang/v1.7.0
+//
+// A module that still reads as skipped by the time the pipeline
+// runs is one the cascade deliberately left alone, so it has no
+// requires to rewrite and the pipeline must not touch it.
+func TestApplyPipelineLeavesSkippedModulesAlone(t *testing.T) {
 	t.Parallel()
 
 	root, mods, plan := threeModuleRepo(t)
-	runner := &gitFakeRunner{}
-
-	if err := ApplyPipeline(t.Context(), runner, root, io.Discard, mods, plan,
-		Options{AllowDirty: true, Message: "release"}); err != nil {
-		t.Fatalf("ApplyPipeline err: %v", err)
-	}
-
-	body, err := os.ReadFile(filepath.Join(root, "leaf", "go.mod"))
+	before, err := os.ReadFile(filepath.Join(root, "leaf", "go.mod"))
 	if err != nil {
 		t.Fatalf("read leaf/go.mod: %v", err)
 	}
-	for _, want := range []string{
-		"example.test/proj v0.2.0",
-		"example.test/proj/mid v0.1.1",
-	} {
-		if !strings.Contains(string(body), want) {
-			t.Errorf("leaf/go.mod = %q, want it to require %q", body, want)
-		}
+	runner := &gitFakeRunner{}
+
+	if runErr := ApplyPipeline(t.Context(), runner, root, io.Discard, mods, plan,
+		Options{AllowDirty: true, Message: "release"}); runErr != nil {
+		t.Fatalf("ApplyPipeline err: %v", runErr)
 	}
 
-	// leaf is never tagged — pinning its requires is not releasing
-	// it.
+	after, err := os.ReadFile(filepath.Join(root, "leaf", "go.mod"))
+	if err != nil {
+		t.Fatalf("re-read leaf/go.mod: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("leaf/go.mod was rewritten:\n%s", after)
+	}
 	for _, tag := range tagNamesFrom(runner) {
 		if strings.HasPrefix(tag, "leaf/") {
-			t.Errorf("tags = %v, want no tag for the skipped module", tagNamesFrom(runner))
+			t.Errorf("tags = %v, want none for the skipped module", tagNamesFrom(runner))
 		}
 	}
-
-	// Ordering is the whole point: leaf/go.mod must be staged
-	// before any tag exists, or the tags carry the stale file.
-	stagedLeafAt, firstTagAt := -1, -1
-	for i, c := range runner.calls {
-		if c.name != "git" || len(c.args) == 0 {
-			continue
+	for _, c := range runner.calls {
+		stagedLeaf := c.name == "git" && len(c.args) > 0 &&
+			c.args[0] == "add" && slices.Contains(c.args, "leaf/go.mod")
+		if stagedLeaf {
+			t.Errorf("calls = %+v, want leaf/go.mod never staged", c.args)
 		}
-		if stagedLeafAt < 0 && c.args[0] == "add" && slices.Contains(c.args, "leaf/go.mod") {
-			stagedLeafAt = i
-		}
-		if firstTagAt < 0 && c.args[0] == "tag" && slices.Contains(c.args, "-a") {
-			firstTagAt = i
-		}
-	}
-	if stagedLeafAt < 0 {
-		t.Fatalf("calls = %+v, want leaf/go.mod staged", runner.calls)
-	}
-	if firstTagAt < 0 || stagedLeafAt > firstTagAt {
-		t.Errorf("leaf/go.mod staged at %d, first tag at %d — want the pin before any tag",
-			stagedLeafAt, firstTagAt)
 	}
 }
 

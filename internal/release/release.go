@@ -57,16 +57,29 @@ func Run(
 	if err != nil {
 		return err
 	}
+	// A module whose requires this release rewrites is released
+	// too, so the rewrite reaches consumers instead of sitting on
+	// main under a tag that predates it. Runs before annotation,
+	// since promotion changes which entries are skipped.
+	if !opts.NoBump && !opts.NoCascade {
+		plan, err = cascadeDependents(root, plan)
+		if err != nil {
+			return err
+		}
+	}
 	// Annotated before printing, so the plan names every file the
-	// run will write — including the go.mod of a module it skips
-	// but still pins. Read-only, so --dry-run stays a dry run.
+	// run will write. Read-only, so --dry-run stays a dry run.
 	if !opts.NoBump {
 		plan, err = annotatePins(root, plan)
 		if err != nil {
 			return err
 		}
 	}
-	printPlan(stdout, plan)
+	waves, err := planWaves(root, mods, plan)
+	if err != nil {
+		return err
+	}
+	printPlan(stdout, waves)
 	if opts.DryRun {
 		fmt.Fprintln(stdout, "\n(dry-run; no files changed, no tags created)")
 		return nil

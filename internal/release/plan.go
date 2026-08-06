@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	xexec "go.thesmos.sh/ergon/internal/exec"
@@ -76,17 +77,31 @@ type Pin struct {
 	To string
 }
 
-// annotatePins fills [PlanEntry.Pins] for every skipped entry by
-// reading its go.mod against the finished version map.
+// cascadeDependents promotes every module whose intra-workspace
+// requires will change into a patch release.
 //
-// Read-only: this runs under --dry-run, where writing anything
-// would defeat the point. It shares [pinChanges] with
-// [bumpOwnRequires], so what the plan discloses and what the apply
-// writes cannot drift apart.
-func annotatePins(root string, plan []PlanEntry) ([]PlanEntry, error) {
-	// Nothing skipped means nothing to disclose, and the version
-	// map below reads every module's go.mod — work a plan that
-	// tags everything cannot use.
+// A module skipped for having no commits of its own still has its
+// go.mod rewritten when a sibling it requires moves. Committing
+// that rewrite without tagging leaves the published module pointing
+// at superseded siblings forever: `go get <mod>@latest` returns the
+// old tag, whose go.mod still names the versions the workspace has
+// left behind. The rewrite is only consumable once it is tagged, so
+// a changed dependency is a release.
+//
+// Patch regardless of the dependency's own level — the dependent's
+// API did not change, only what it builds against.
+//
+// The loop runs to a fixpoint because promotion is transitive: once
+// a module gains a new version, everything requiring it has a
+// changed require too. Each pass promotes at least one entry or
+// stops, so it terminates in at most len(plan) passes.
+//
+// A no-op under --version, which already puts every module at the
+// same version and so leaves nothing skipped to promote.
+func cascadeDependents(root string, plan []PlanEntry) ([]PlanEntry, error) {
+	// Nothing skipped means nothing to promote, and the graph read
+	// below opens every module's go.mod — work a plan that already
+	// releases everything cannot use.
 	skipped := false
 	for _, e := range plan {
 		if e.Skipped() {
@@ -95,6 +110,59 @@ func annotatePins(root string, plan []PlanEntry) ([]PlanEntry, error) {
 		}
 	}
 	if !skipped {
+		return plan, nil
+	}
+
+	out := slices.Clone(plan)
+
+	// Fixpoint, because promoting one module moves its version and
+	// so can give a module that requires it a pin it did not have a
+	// round earlier. Bounded by the module count: each round promotes
+	// at least one entry or stops.
+	for range len(out) {
+		annotated, err := annotatePins(root, out)
+		if err != nil {
+			return nil, err
+		}
+		promoted := false
+		for i, e := range annotated {
+			if !e.Skipped() || len(e.Pins) == 0 {
+				continue
+			}
+			triggers := make([]string, 0, len(e.Pins))
+			for _, p := range e.Pins {
+				triggers = append(triggers, p.Path)
+			}
+			slices.Sort(triggers)
+			next, bumpErr := BumpSemver(e.OldVersion, BumpPatch)
+			if bumpErr != nil {
+				return nil, fmt.Errorf("cascade: bump %s: %w", e.Module.Dir, bumpErr)
+			}
+			out[i].Level = BumpPatch
+			out[i].NewVersion = next
+			out[i].Tag = e.Module.TagPrefix() + "v" + next
+			out[i].Reason = "patch: requires " + strings.Join(triggers, ", ") +
+				" — pinned by this release"
+			promoted = true
+		}
+		if !promoted {
+			break
+		}
+	}
+	return out, nil
+}
+
+// annotatePins fills [PlanEntry.Pins] for every skipped entry by
+// reading its go.mod against the finished version map.
+//
+// Read-only: this runs under --dry-run, where writing anything
+// would defeat the point. It shares [pinChanges] with
+// [bumpOwnRequires], so what the plan discloses and what the apply
+// writes cannot drift apart.
+func annotatePins(root string, plan []PlanEntry) ([]PlanEntry, error) {
+	// A single module has no siblings to require, so there is
+	// nothing to pin and nothing to read.
+	if len(plan) < 2 {
 		return plan, nil
 	}
 
@@ -108,12 +176,11 @@ func annotatePins(root string, plan []PlanEntry) ([]PlanEntry, error) {
 		return nil, err
 	}
 
+	// Every entry, not only the skipped ones: a module being tagged
+	// has its requires rewritten too, and showing only half of what
+	// a release writes is the same under-reporting in a new place.
 	out := make([]PlanEntry, 0, len(plan))
 	for _, e := range plan {
-		if !e.Skipped() {
-			out = append(out, e)
-			continue
-		}
 		pins, pinErr := pinChanges(root, e.Module.Dir, want)
 		if pinErr != nil {
 			return nil, pinErr
@@ -122,6 +189,59 @@ func annotatePins(root string, plan []PlanEntry) ([]PlanEntry, error) {
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+// planWaves groups entries into the order [ApplyPipeline] processes
+// them: a module joins a wave once every workspace module it
+// requires sits in an earlier one.
+//
+// The grouping is the execution order and therefore the signing
+// order — one commit, N tags and one push per wave, each able to
+// block on a hardware key. Printing it lets the operator see how
+// many prompts are coming, and for what, before touching the key.
+//
+// Returns a single wave when the graph is trivial or cyclic, which
+// degrades the display rather than failing a release over it;
+// [ApplyPipeline] reports a cycle properly.
+func planWaves(
+	root string, mods []modules.Module, plan []PlanEntry,
+) ([][]PlanEntry, error) {
+	if len(plan) < 2 {
+		return [][]PlanEntry{plan}, nil
+	}
+	deps, err := workspaceDeps(root, mods)
+	if err != nil {
+		return nil, err
+	}
+
+	placed := map[string]bool{}
+	var waves [][]PlanEntry
+	for len(placed) < len(plan) {
+		var wave []PlanEntry
+		for _, e := range plan {
+			if placed[e.Module.Dir] {
+				continue
+			}
+			ready := true
+			for dep := range deps[e.Module.Dir] {
+				if !placed[dep] {
+					ready = false
+					break
+				}
+			}
+			if ready {
+				wave = append(wave, e)
+			}
+		}
+		if len(wave) == 0 {
+			return [][]PlanEntry{plan}, nil
+		}
+		for _, e := range wave {
+			placed[e.Module.Dir] = true
+		}
+		waves = append(waves, wave)
+	}
+	return waves, nil
 }
 
 // Skipped reports whether this entry should produce no tag.
@@ -291,35 +411,81 @@ func excludePathsFor(m modules.Module, mods []modules.Module) []string {
 	return out
 }
 
-// printPlan writes a human-readable representation of plan to w.
-// Each entry occupies one line; skipped entries are flagged
-// explicitly. The first line is the section header.
-func printPlan(w io.Writer, plan []PlanEntry) {
-	fmt.Fprintln(w, "Release plan:")
-	if len(plan) == 0 {
+// printPlan writes a human-readable representation of waves to w.
+//
+// Each entry occupies one line — module, old → new, tag, and the
+// reason the level was chosen — followed by one indented line per
+// require the release will rewrite. Skipped entries are flagged.
+//
+// Wave headings and the signing summary appear only when there is
+// more than one wave, so a single-module repository is not made to
+// read like a fleet. The summary exists because this output is what
+// an operator reads immediately before a hardware key starts asking
+// for a PIN: it answers how many prompts are coming and why, which
+// a flat list of ten modules does not.
+func printPlan(w io.Writer, waves [][]PlanEntry) {
+	total, tags, pins, commits := 0, 0, 0, 0
+	for _, wave := range waves {
+		writes := false
+		for _, e := range wave {
+			total++
+			if !e.Skipped() {
+				tags++
+			}
+			pins += len(e.Pins)
+			if len(e.Pins) > 0 {
+				writes = true
+			}
+		}
+		if writes {
+			commits++
+		}
+	}
+	if total == 0 {
+		fmt.Fprintln(w, "Release plan:")
 		fmt.Fprintln(w, "  (no modules)")
 		return
 	}
-	// One format for every row. The skip branch used to hard-code a
-	// run of spaces where this uses a width, so its reason column
-	// landed under the tag column and a ten-module plan read as two
-	// interleaved tables.
-	for _, e := range plan {
-		target, action := e.NewVersion, "tag "+e.Tag
-		switch {
-		case e.Skipped() && len(e.Pins) > 0:
-			// Not tagged, but written to: its requires are rewritten
-			// because a sibling moved.
-			target, action = "(pin only)", ""
-		case e.Skipped():
-			target, action = "(skip)", ""
+
+	// Wave headings earn their space only when there is more than
+	// one; a single-module repository keeps the flat listing.
+	grouped := len(waves) > 1
+	indent := "  "
+	if grouped {
+		fmt.Fprintf(w, "Release plan — %d modules in %d waves, %d tags\n",
+			total, len(waves), tags)
+		indent = "    "
+	} else {
+		fmt.Fprintln(w, "Release plan:")
+	}
+
+	for i, wave := range waves {
+		if grouped {
+			after := "nothing published yet"
+			if i > 0 {
+				after = fmt.Sprintf("after wave %d is pushed", i)
+			}
+			fmt.Fprintf(w, "\n  wave %d  ·  %s\n", i+1, after)
 		}
-		fmt.Fprintf(w, "  %-32s %-8s -> %-12s %-36s (%s)\n",
-			e.Module.Dir, e.OldVersion, target, action, e.Reason)
-		for _, p := range e.Pins {
-			fmt.Fprintf(w, "  %-32s %-8s    %-12s %s %s -> %s\n",
-				"", "", "", p.Path, p.From, p.To)
+		for _, e := range wave {
+			target, action := e.NewVersion, "tag "+e.Tag
+			if e.Skipped() {
+				target, action = "(skip)", ""
+			}
+			fmt.Fprintf(w, "%s%-26s %-8s -> %-10s %-34s (%s)\n",
+				indent, e.Module.Dir, e.OldVersion, target, action, e.Reason)
+			for _, p := range e.Pins {
+				fmt.Fprintf(w, "%s    pin  %-42s %s -> %s\n",
+					indent, p.Path, p.From, p.To)
+			}
 		}
+	}
+
+	if grouped {
+		fmt.Fprintf(w,
+			"\n  Each wave: rewrite go.mod → tidy → one commit → tag → push.\n"+
+				"  %d pin(s); %d tag, %d commit and %d push signature(s).\n",
+			pins, tags, commits, len(waves))
 	}
 }
 

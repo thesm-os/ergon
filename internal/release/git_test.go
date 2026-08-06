@@ -228,12 +228,17 @@ type gitFakeRunner struct {
 type gitCall struct {
 	name string
 	args []string
+	env  []string
 }
 
 func (f *gitFakeRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
 	f.mu.Lock()
 	idx := len(f.calls)
-	f.calls = append(f.calls, gitCall{name: name, args: append([]string(nil), args...)})
+	f.calls = append(f.calls, gitCall{
+		name: name,
+		args: append([]string(nil), args...),
+		env:  append([]string(nil), opts.Env...),
+	})
 	body := f.output
 	if idx < len(f.perCallOutputs) {
 		body = f.perCallOutputs[idx]
