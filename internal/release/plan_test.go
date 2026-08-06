@@ -6,6 +6,8 @@ package release
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -589,5 +591,236 @@ func TestBuildPlanGitFailure(t *testing.T) {
 		[]modules.Module{{Dir: "."}}, Options{Message: "release"})
 	if err == nil {
 		t.Fatal("BuildPlan returned nil, want the git failure propagated")
+	}
+}
+
+// TestPrintPlanDistinguishesPinFromSkip pins the disclosure the dry
+// run owes the operator.
+//
+// A module skipped for having no commits still has its requires
+// rewritten and committed, because a sibling it depends on moved.
+// Rendering that as `(skip)` says nothing will be written to it,
+// which is false — and `--dry-run` is only worth running if it
+// describes every file the run will touch.
+//
+// A skipped module with nothing to rewrite keeps `(skip)`: the two
+// states differ, and collapsing them loses the distinction the
+// operator is reading for.
+func TestPrintPlanDistinguishesPinFromSkip(t *testing.T) {
+	t.Parallel()
+
+	plan := []PlanEntry{
+		{
+			Module: modules.Module{Dir: "."}, Level: BumpMinor,
+			OldVersion: "0.1.0", NewVersion: "0.2.0", Tag: "v0.2.0", Reason: "feat",
+		},
+		{
+			Module: modules.Module{Dir: "leaf"}, Level: BumpNone,
+			OldVersion: "0.1.0", NewVersion: "0.1.0", Reason: "no commits in module scope",
+			Pins: []Pin{
+				{Path: "example.test/proj", From: "v0.1.0", To: "v0.2.0"},
+				{Path: "example.test/proj/mid", From: "v0.1.0", To: "v0.1.1"},
+			},
+		},
+		{
+			Module: modules.Module{Dir: "lonely"}, Level: BumpNone,
+			OldVersion: "0.3.0", NewVersion: "0.3.0", Reason: "no commits in module scope",
+		},
+	}
+
+	var out strings.Builder
+	printPlan(&out, plan)
+	got := out.String()
+
+	if !strings.Contains(got, "(pin only)") {
+		t.Errorf("output = %q, want the pinned module flagged", got)
+	}
+	for _, want := range []string{
+		"example.test/proj", "v0.1.0 -> v0.2.0",
+		"example.test/proj/mid", "v0.1.0 -> v0.1.1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output = %q, want it to name the pin %q", got, want)
+		}
+	}
+
+	lonely := ""
+	for line := range strings.SplitSeq(got, "\n") {
+		if strings.Contains(line, "lonely") {
+			lonely = line
+		}
+	}
+	if !strings.Contains(lonely, "(skip)") || strings.Contains(lonely, "pin") {
+		t.Errorf("lonely line = %q, want a plain (skip)", lonely)
+	}
+}
+
+// TestPrintPlanAligns guards the column layout. The skip branch used
+// a literal run of spaces where the tagged branch used a width, so
+// the reason column sat under the tag column and a ten-module plan
+// read as two interleaved tables.
+func TestPrintPlanAligns(t *testing.T) {
+	t.Parallel()
+
+	var out strings.Builder
+	printPlan(&out, []PlanEntry{
+		{
+			Module: modules.Module{Dir: "."}, Level: BumpMinor,
+			OldVersion: "0.1.0", NewVersion: "0.2.0", Tag: "v0.2.0", Reason: "feat",
+		},
+		{
+			Module: modules.Module{Dir: "leaf"}, Level: BumpNone,
+			OldVersion: "0.1.0", NewVersion: "0.1.0", Reason: "no commits",
+		},
+	})
+
+	var starts []int
+	for line := range strings.SplitSeq(strings.TrimSpace(out.String()), "\n") {
+		if i := strings.Index(line, "->"); i >= 0 {
+			starts = append(starts, i)
+		}
+	}
+	if len(starts) != 2 {
+		t.Fatalf("found %d entry lines, want 2", len(starts))
+	}
+	if starts[0] != starts[1] {
+		t.Errorf("arrow columns at %v, want them aligned", starts)
+	}
+}
+
+// TestPinChangesErrors pins the failure paths of the read the plan
+// and the apply share. A go.mod that cannot be read or parsed is a
+// real condition — a half-written file, a module directory removed
+// under a running release — and silently reporting "no pins" would
+// let the plan claim a module is untouched while the apply then
+// fails on it.
+func TestPinChangesErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a missing go.mod is an error", func(t *testing.T) {
+		t.Parallel()
+		_, err := pinChanges(t.TempDir(), "absent", map[string]string{"x": "v1.0.0"})
+		if err == nil {
+			t.Fatal("pinChanges = nil, want the missing file reported")
+		}
+	})
+
+	t.Run("a malformed go.mod is an error", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "go.mod"),
+			[]byte("this is not a go.mod\n"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if _, err := pinChanges(root, ".", map[string]string{"x": "v1.0.0"}); err == nil {
+			t.Fatal("pinChanges = nil, want the parse failure reported")
+		}
+	})
+}
+
+// TestReleasedVersionMapMissingGoMod pins that a module in the plan
+// with no go.mod on disk surfaces rather than silently dropping out
+// of the version map — a dependent would then keep requiring a
+// superseded version with nothing reporting why.
+func TestReleasedVersionMapMissingGoMod(t *testing.T) {
+	t.Parallel()
+
+	_, err := releasedVersionMap(t.TempDir(),
+		map[string]string{"gone": "1.0.0"}, map[string]bool{"gone": true})
+	if err == nil {
+		t.Fatal("releasedVersionMap = nil, want the missing go.mod reported")
+	}
+}
+
+// TestAnnotatePinsPropagatesErrors pins that neither read failure is
+// swallowed on the way to the printed plan.
+func TestAnnotatePinsPropagatesErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a module missing from disk fails the version map", func(t *testing.T) {
+		t.Parallel()
+		_, err := annotatePins(t.TempDir(), []PlanEntry{{
+			Module: modules.Module{Dir: "gone"}, Level: BumpNone,
+			OldVersion: "0.1.0", NewVersion: "0.1.0", Reason: "no commits",
+		}})
+		if err == nil {
+			t.Fatal("annotatePins = nil, want the version-map failure propagated")
+		}
+	})
+
+	t.Run("a never-tagged skipped module still fails on its own go.mod", func(t *testing.T) {
+		t.Parallel()
+		// initialVersion keeps it out of the version map, so the
+		// read that fails is pinChanges' rather than the map's.
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "go.mod"),
+			[]byte("module example.test/proj\n\ngo 1.26\n"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		_, err := annotatePins(root, []PlanEntry{
+			{
+				Module: modules.Module{Dir: "."}, Level: BumpMinor,
+				OldVersion: "0.1.0", NewVersion: "0.2.0", Tag: "v0.2.0", Reason: "feat",
+			},
+			{
+				Module: modules.Module{Dir: "absent"}, Level: BumpNone,
+				OldVersion: initialVersion, NewVersion: initialVersion, Reason: "no commits",
+			},
+		})
+		if err == nil {
+			t.Fatal("annotatePins = nil, want the pinChanges failure propagated")
+		}
+	})
+}
+
+// TestAnnotatePins pins the computation behind the disclosure: the
+// plan learns which requires a skipped module will have rewritten
+// by reading its go.mod against the finished version map, without
+// writing anything.
+func TestAnnotatePins(t *testing.T) {
+	t.Parallel()
+
+	root, _, plan := threeModuleRepo(t)
+	before, err := os.ReadFile(filepath.Join(root, "leaf", "go.mod"))
+	if err != nil {
+		t.Fatalf("read leaf/go.mod: %v", err)
+	}
+
+	annotated, err := annotatePins(root, plan)
+	if err != nil {
+		t.Fatalf("annotatePins: %v", err)
+	}
+
+	var leaf PlanEntry
+	for _, e := range annotated {
+		if e.Module.Dir == "leaf" {
+			leaf = e
+		}
+	}
+	if len(leaf.Pins) != 2 {
+		t.Fatalf("leaf pins = %+v, want 2", leaf.Pins)
+	}
+	for _, p := range leaf.Pins {
+		switch p.Path {
+		case "example.test/proj":
+			if p.From != "v0.1.0" || p.To != "v0.2.0" {
+				t.Errorf("pin %+v, want v0.1.0 -> v0.2.0", p)
+			}
+		case "example.test/proj/mid":
+			if p.From != "v0.1.0" || p.To != "v0.1.1" {
+				t.Errorf("pin %+v, want v0.1.0 -> v0.1.1", p)
+			}
+		default:
+			t.Errorf("unexpected pin %+v", p)
+		}
+	}
+
+	// Annotation is what --dry-run runs, so it must not write.
+	after, err := os.ReadFile(filepath.Join(root, "leaf", "go.mod"))
+	if err != nil {
+		t.Fatalf("re-read leaf/go.mod: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("leaf/go.mod changed during annotation:\n%s", after)
 	}
 }

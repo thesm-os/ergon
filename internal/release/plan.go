@@ -48,6 +48,80 @@ type PlanEntry struct {
 	// when the entry's outcome is "skip" (no commits in scope and
 	// no force flag).
 	Tag string
+
+	// Pins are the require rewrites this module will receive
+	// without being tagged, populated by [annotatePins].
+	//
+	// A skipped module still depends on siblings that moved, so the
+	// release rewrites its requires and commits the result. Without
+	// this the plan rendered such a module as `(skip)` while the
+	// run wrote to it, and `--dry-run` stopped being a complete
+	// description of what a release does.
+	//
+	// Empty for a tagged module — its rewrites are implied by the
+	// tag — and for a skipped module with nothing to change.
+	Pins []Pin
+}
+
+// Pin is one require rewrite a release will make in a module it
+// does not tag.
+type Pin struct {
+	// Path is the required module's import path.
+	Path string
+
+	// From is the version currently in the go.mod.
+	From string
+
+	// To is the version the release will pin it to.
+	To string
+}
+
+// annotatePins fills [PlanEntry.Pins] for every skipped entry by
+// reading its go.mod against the finished version map.
+//
+// Read-only: this runs under --dry-run, where writing anything
+// would defeat the point. It shares [pinChanges] with
+// [bumpOwnRequires], so what the plan discloses and what the apply
+// writes cannot drift apart.
+func annotatePins(root string, plan []PlanEntry) ([]PlanEntry, error) {
+	// Nothing skipped means nothing to disclose, and the version
+	// map below reads every module's go.mod — work a plan that
+	// tags everything cannot use.
+	skipped := false
+	for _, e := range plan {
+		if e.Skipped() {
+			skipped = true
+			break
+		}
+	}
+	if !skipped {
+		return plan, nil
+	}
+
+	versions, _ := planVersions(plan)
+	resolved := map[string]bool{}
+	for _, e := range plan {
+		resolved[e.Module.Dir] = true
+	}
+	want, err := releasedVersionMap(root, versions, resolved)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]PlanEntry, 0, len(plan))
+	for _, e := range plan {
+		if !e.Skipped() {
+			out = append(out, e)
+			continue
+		}
+		pins, pinErr := pinChanges(root, e.Module.Dir, want)
+		if pinErr != nil {
+			return nil, pinErr
+		}
+		e.Pins = pins
+		out = append(out, e)
+	}
+	return out, nil
 }
 
 // Skipped reports whether this entry should produce no tag.
@@ -226,14 +300,26 @@ func printPlan(w io.Writer, plan []PlanEntry) {
 		fmt.Fprintln(w, "  (no modules)")
 		return
 	}
+	// One format for every row. The skip branch used to hard-code a
+	// run of spaces where this uses a width, so its reason column
+	// landed under the tag column and a ten-module plan read as two
+	// interleaved tables.
 	for _, e := range plan {
-		if e.Skipped() {
-			fmt.Fprintf(w, "  %-32s %s -> (skip)        %s\n",
-				e.Module.Dir, e.OldVersion, e.Reason)
-			continue
+		target, action := e.NewVersion, "tag "+e.Tag
+		switch {
+		case e.Skipped() && len(e.Pins) > 0:
+			// Not tagged, but written to: its requires are rewritten
+			// because a sibling moved.
+			target, action = "(pin only)", ""
+		case e.Skipped():
+			target, action = "(skip)", ""
 		}
-		fmt.Fprintf(w, "  %-32s %s -> %-12s tag %-32s (%s)\n",
-			e.Module.Dir, e.OldVersion, e.NewVersion, e.Tag, e.Reason)
+		fmt.Fprintf(w, "  %-32s %-8s -> %-12s %-36s (%s)\n",
+			e.Module.Dir, e.OldVersion, target, action, e.Reason)
+		for _, p := range e.Pins {
+			fmt.Fprintf(w, "  %-32s %-8s    %-12s %s %s -> %s\n",
+				"", "", "", p.Path, p.From, p.To)
+		}
 	}
 }
 

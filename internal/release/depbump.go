@@ -87,20 +87,7 @@ func ApplyPipeline(
 	// toTag counts only the entries that will produce a tag: the
 	// map is no longer a proxy for "is there anything to do", since
 	// an all-skipped plan now populates it.
-	versions := map[string]string{}
-	toTag := 0
-	for _, e := range plan {
-		if !e.Skipped() {
-			versions[e.Module.Dir] = e.NewVersion
-			toTag++
-			continue
-		}
-		// initialVersion means the module has never been tagged, so
-		// there is no released version for a dependent to pin to.
-		if e.OldVersion != "" && e.OldVersion != initialVersion {
-			versions[e.Module.Dir] = e.OldVersion
-		}
-	}
+	versions, toTag := planVersions(plan)
 	if toTag == 0 {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "(nothing to tag)")
@@ -399,20 +386,9 @@ func layerReady(plan []PlanEntry, deps map[string]map[string]bool, released map[
 func bumpOwnRequires(
 	root string, ready []string, versions map[string]string, released map[string]bool,
 ) ([]string, error) {
-	// Build the import-path → "vX.Y.Z" map for every module that
-	// has already been released. The map is keyed by import path
-	// (matching what go.mod's `require` directive reads) rather
-	// than module directory.
-	releasedVersions := map[string]string{}
-	for dir, ver := range versions {
-		if !released[dir] {
-			continue
-		}
-		ip, err := readModulePath(filepath.Join(root, dir, "go.mod"))
-		if err != nil {
-			return nil, fmt.Errorf("bumpOwnRequires: %s: %w", dir, err)
-		}
-		releasedVersions[ip] = "v" + ver
+	releasedVersions, err := releasedVersionMap(root, versions, released)
+	if err != nil {
+		return nil, err
 	}
 	if len(releasedVersions) == 0 {
 		return nil, nil
@@ -420,6 +396,16 @@ func bumpOwnRequires(
 
 	bumped := []string{}
 	for _, dir := range ready {
+		// The same detection the plan discloses through
+		// [annotatePins], so what is announced and what is written
+		// cannot diverge.
+		pins, pinErr := pinChanges(root, dir, releasedVersions)
+		if pinErr != nil {
+			return nil, pinErr
+		}
+		if len(pins) == 0 {
+			continue
+		}
 		modPath := filepath.Join(root, dir, "go.mod")
 		body, err := os.ReadFile(modPath)
 		if err != nil {
@@ -429,22 +415,10 @@ func bumpOwnRequires(
 		if err != nil {
 			return nil, fmt.Errorf("bumpOwnRequires: parse %s: %w", dir, err)
 		}
-		changed := false
-		for _, r := range f.Require {
-			if r == nil {
-				continue
+		for _, p := range pins {
+			if addErr := f.AddRequire(p.Path, p.To); addErr != nil {
+				return nil, fmt.Errorf("bumpOwnRequires: AddRequire %s: %w", p.Path, addErr)
 			}
-			want, ok := releasedVersions[r.Mod.Path]
-			if !ok || r.Mod.Version == want {
-				continue
-			}
-			if addErr := f.AddRequire(r.Mod.Path, want); addErr != nil {
-				return nil, fmt.Errorf("bumpOwnRequires: AddRequire %s: %w", r.Mod.Path, addErr)
-			}
-			changed = true
-		}
-		if !changed {
-			continue
 		}
 		f.SortBlocks()
 		f.Cleanup()
@@ -502,6 +476,79 @@ func commitPaths(ctx context.Context, runner xexec.Runner, root string, paths []
 		return fmt.Errorf("git add: %w: %s", err, strings.TrimSpace(buf.String()))
 	}
 	return runGitInteractive(ctx, runner, root, "commit", "--no-verify", "-m", msg)
+}
+
+// planVersions maps each module directory to the version dependents
+// should pin it at, and reports how many entries will be tagged.
+//
+// A skipped module contributes the version it already sits on, so a
+// released dependent pins it at its real tag rather than dropping
+// the requirement. The count is returned separately because the map
+// is no longer a proxy for "is there anything to do" once skipped
+// entries populate it.
+func planVersions(plan []PlanEntry) (map[string]string, int) {
+	versions := map[string]string{}
+	toTag := 0
+	for _, e := range plan {
+		if !e.Skipped() {
+			versions[e.Module.Dir] = e.NewVersion
+			toTag++
+			continue
+		}
+		// initialVersion means the module has never been tagged, so
+		// there is no released version for a dependent to pin to.
+		if e.OldVersion != "" && e.OldVersion != initialVersion {
+			versions[e.Module.Dir] = e.OldVersion
+		}
+	}
+	return versions, toTag
+}
+
+// releasedVersionMap builds the import-path → "vX.Y.Z" map for
+// every resolved module. Keyed by import path because that is what
+// a go.mod `require` directive reads, not by module directory.
+func releasedVersionMap(
+	root string, versions map[string]string, resolved map[string]bool,
+) (map[string]string, error) {
+	out := map[string]string{}
+	for dir, ver := range versions {
+		if !resolved[dir] {
+			continue
+		}
+		ip, err := readModulePath(filepath.Join(root, dir, "go.mod"))
+		if err != nil {
+			return nil, fmt.Errorf("release: read module path for %s: %w", dir, err)
+		}
+		out[ip] = "v" + ver
+	}
+	return out, nil
+}
+
+// pinChanges reports the require rewrites moduleDir needs, reading
+// its go.mod and writing nothing. Shared by the planner, which
+// discloses them, and by [bumpOwnRequires], which applies them.
+func pinChanges(root, moduleDir string, want map[string]string) ([]Pin, error) {
+	modPath := filepath.Join(root, moduleDir, "go.mod")
+	body, err := os.ReadFile(modPath)
+	if err != nil {
+		return nil, fmt.Errorf("release: read %s: %w", moduleDir, err)
+	}
+	f, err := modfile.Parse(modPath, body, nil)
+	if err != nil {
+		return nil, fmt.Errorf("release: parse %s: %w", moduleDir, err)
+	}
+	var out []Pin
+	for _, r := range f.Require {
+		if r == nil {
+			continue
+		}
+		to, ok := want[r.Mod.Path]
+		if !ok || r.Mod.Version == to {
+			continue
+		}
+		out = append(out, Pin{Path: r.Mod.Path, From: r.Mod.Version, To: to})
+	}
+	return out, nil
 }
 
 // bumpedPaths returns the go.mod + go.sum paths (relative to
