@@ -210,8 +210,14 @@ func isAllDigits(s string) bool {
 
 // siblingsFor returns every distinct workspace module, other than
 // the package's own, that the packages in moduleDir import. It is
-// the module-level union of [coupledModule] across a module's
+// the module-level union of [coupledModules] across a module's
 // packages, so one staged modfile serves every package in it.
+//
+// The union is over [coupledModules], not [coupledModule]: a single
+// package may import several siblings, and every one of them needs
+// its relative `replace` rewritten. Taking one per package left the
+// others relative and gobco's relocated copy failed to resolve
+// them.
 func siblingsFor(moduleDir string, pkgs []pkgInfo, imports []modules.Import) []string {
 	seen := map[string]struct{}{}
 	var out []string
@@ -219,15 +225,13 @@ func siblingsFor(moduleDir string, pkgs []pkgInfo, imports []modules.Import) []s
 		if owningModuleDir(p.RepoRel, imports) != moduleDir {
 			continue
 		}
-		dep, coupled := coupledModule(p, imports)
-		if !coupled {
-			continue
+		for _, dep := range coupledModules(p, imports) {
+			if _, dup := seen[dep]; dup {
+				continue
+			}
+			seen[dep] = struct{}{}
+			out = append(out, dep)
 		}
-		if _, dup := seen[dep]; dup {
-			continue
-		}
-		seen[dep] = struct{}{}
-		out = append(out, dep)
 	}
 	return out
 }

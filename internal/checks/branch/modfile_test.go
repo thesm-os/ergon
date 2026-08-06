@@ -6,6 +6,7 @@ package branch
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -138,6 +139,47 @@ func TestInitialRequireVersion(t *testing.T) {
 		if got := initialRequireVersion(tc.path); got != tc.want {
 			t.Errorf("initialRequireVersion(%q) = %q, want %q", tc.path, got, tc.want)
 		}
+	}
+}
+
+// TestSiblingsForEveryCoupling pins that a package importing more
+// than one sibling module contributes all of them.
+//
+// coupledModule returns at the first coupling it finds, which is
+// correct for the skip notice (one name is enough to explain the
+// demotion) and wrong for staging, which needs every sibling whose
+// relative replace must become absolute.
+//
+// The shape that exposed it, from go.thesmos.sh/testkit: package
+// cmd/testkit/cmds imports go.thesmos.sh/testkit/core/brand and
+// go.thesmos.sh/testkit/generator. The first belongs to the root
+// module, the second to a sibling. go list emitted them in that
+// order, so only the root was staged, cmd/go.mod kept
+//
+//	replace go.thesmos.sh/testkit/generator => ../generator
+//
+// relative, and gobco's relocated copy failed with
+// "replacement directory ../generator does not exist".
+func TestSiblingsForEveryCoupling(t *testing.T) {
+	t.Parallel()
+
+	pkgs := []pkgInfo{{
+		ImportPath: "example.test/ws/beta/cmds",
+		RepoRel:    "beta/cmds",
+		// The root module's package comes first, exactly as go list
+		// emitted it in the failing repository.
+		Imports: []string{
+			"example.test/ws/core/brand",
+			"example.test/ws/alpha",
+			"os",
+		},
+	}}
+
+	got := siblingsFor("beta", pkgs, wsImports)
+	slices.Sort(got)
+	want := []string{"example.test/ws", "example.test/ws/alpha"}
+	if !slices.Equal(got, want) {
+		t.Errorf("siblingsFor = %v, want %v — every sibling needs its replace made absolute", got, want)
 	}
 }
 

@@ -356,7 +356,33 @@ type pkgInfo struct {
 // Single-module repositories never match: with one entry in
 // imports there is no other module to couple to.
 func coupledModule(pkg pkgInfo, imports []modules.Import) (string, bool) {
+	all := coupledModules(pkg, imports)
+	if len(all) == 0 {
+		return "", false
+	}
+	return all[0], true
+}
+
+// coupledModules returns every distinct workspace module, other
+// than the package's own, that pkg imports.
+//
+// [coupledModule] answers "is this package coupled, and to what" —
+// one name is enough to explain a demoted skip. Staging needs the
+// complete set: every sibling whose relative `replace` has to be
+// rewritten absolute, and a single name silently leaves the rest
+// pointing at directories that do not exist beside the temp copy.
+//
+// go.thesmos.sh/testkit is the case that exposed the difference.
+// Package cmd/testkit/cmds imports go.thesmos.sh/testkit/core/brand
+// and go.thesmos.sh/testkit/generator; the first resolves to the
+// root module and the second to a sibling, and go list emitted them
+// in that order. Staging saw only the root, so cmd/go.mod kept
+// `replace go.thesmos.sh/testkit/generator => ../generator`
+// relative and gobco's copy failed to build.
+func coupledModules(pkg pkgInfo, imports []modules.Import) []string {
 	own := owningModuleDir(pkg.RepoRel, imports)
+	seen := map[string]struct{}{}
+	var out []string
 	for _, imp := range pkg.Imports {
 		// Attribute the import to the module with the LONGEST
 		// matching path. Module paths nest — `example.test/ws` is a
@@ -376,11 +402,16 @@ func coupledModule(pkg pkgInfo, imports []modules.Import) (string, bool) {
 				owner, ownerDir = ip.ImportPath, ip.Dir
 			}
 		}
-		if owner != "" && ownerDir != own {
-			return owner, true
+		if owner == "" || ownerDir == own {
+			continue
 		}
+		if _, dup := seen[owner]; dup {
+			continue
+		}
+		seen[owner] = struct{}{}
+		out = append(out, owner)
 	}
-	return "", false
+	return out
 }
 
 // owningModuleDir returns the module directory that owns the
