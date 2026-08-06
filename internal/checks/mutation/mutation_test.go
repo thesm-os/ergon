@@ -60,6 +60,50 @@ func TestRun(t *testing.T) {
 		}
 	})
 
+	t.Run("a nested module is excluded and the exclusion is announced", func(t *testing.T) {
+		t.Parallel()
+		root := buildTree(t, "foundation")
+		// A module rooted inside the layer. gremlins would otherwise
+		// walk into it and mutate files whose tests never run, which
+		// is how a root layer came to report 22.1% mutator coverage
+		// against 100% line coverage on a five-module workspace.
+		nestedDir := filepath.Join(root, "foundation", "sub")
+		if err := os.MkdirAll(nestedDir, 0o750); err != nil {
+			t.Fatalf("mkdir nested module: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(nestedDir, "go.mod"),
+			[]byte("module example.test/sub\n"), 0o600); err != nil {
+			t.Fatalf("write nested go.mod: %v", err)
+		}
+
+		runner := &fakeRunner{output: gremlinsOutput(95, 95)}
+		cfg := Config{Packages: []Layer{{Path: "foundation/...", Score: 90, Coverage: 90}}}
+		var stdout strings.Builder
+		if err := Run(t.Context(), runner, &stdout, io.Discard,
+			root, cfg, nil, nil, RunOptions{}); err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+
+		// Announced, because this is the only exclusion ergon applies
+		// that .ergon.yaml does not declare. Without the line a
+		// layer's number changes meaning between releases with
+		// nothing on screen to explain it.
+		if !strings.Contains(stdout.String(), "excluded 1 nested module(s): foundation/sub") {
+			t.Errorf("stdout = %q, want the exclusion disclosed", stdout.String())
+		}
+
+		// The announcement is worthless if the pattern never reaches
+		// gremlins, so assert the invocation too, not just the prose.
+		if len(runner.calls) == 0 {
+			t.Fatal("no gremlins invocation recorded")
+		}
+		for _, want := range []string{"--exclude-files", "^foundation/sub/"} {
+			if !strings.Contains(runner.calls[0], want) {
+				t.Errorf("invocation = %q, want it to carry %q", runner.calls[0], want)
+			}
+		}
+	})
+
 	t.Run("score below threshold fails", func(t *testing.T) {
 		t.Parallel()
 		root := buildTree(t, "foundation")

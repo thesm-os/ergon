@@ -271,8 +271,27 @@ func renderTarget(
 
 	dir, pkgPath := resolveInvocation(root, t.Path)
 
+	// A layer's walk stops where a nested module begins; see
+	// [nestedModules] for why gremlins cannot work this out itself.
+	nested, nestedErr := nestedModules(dir, filepath.Join(root, t.Path))
+	if nestedErr != nil {
+		fmt.Fprintf(stdout, "  %s   %v\n\n", s.Fail(), nestedErr)
+		return true
+	}
+	if len(nested) > 0 {
+		// Announced, because this is the one exclusion ergon applies
+		// that `.ergon.yaml` does not declare. Every other one
+		// carries a `reason:` a reviewer can challenge; this one is a
+		// fact about the build rather than a judgement, but it still
+		// has to be visible or the layer's number silently changes
+		// meaning between releases.
+		fmt.Fprintf(stdout, "  %s\n", s.Dimmed(fmt.Sprintf(
+			"excluded %d nested module(s): %s", len(nested), strings.Join(nested, ", "))))
+	}
+
 	start := time.Now()
-	out, runErr := runGremlins(ctx, runner, dir, pkgPath, gcfg, excludeRegex)
+	out, runErr := runGremlins(
+		ctx, runner, dir, pkgPath, gcfg, withNestedExclusions(excludeRegex, nested))
 	elapsed := time.Since(start)
 
 	score, scoreOK := parsePercent(out, "Test efficacy:")
