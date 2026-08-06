@@ -22,8 +22,12 @@ import (
 // state and races any concurrent os.Environ read.
 func TestNew(t *testing.T) {
 	// Restored by the test framework when the test ends, so the
-	// suite's own TMPDIR survives New overwriting it.
-	t.Setenv("TMPDIR", t.TempDir())
+	// suite's own temp location survives New overwriting it. Every
+	// variable os.TempDir consults on this platform is guarded, not
+	// just TMPDIR — Windows resolves through TMP / TEMP.
+	for _, key := range tempDirVars() {
+		t.Setenv(key, t.TempDir())
+	}
 
 	root, cleanup, err := New()
 	if err != nil {
@@ -38,10 +42,21 @@ func TestNew(t *testing.T) {
 		t.Errorf("root = %q, want the %q prefix so Sweep can recognise it", root, prefix)
 	}
 
-	// TMPDIR is the whole mechanism: os.TempDir re-reads it, so
-	// every existing CreateTemp("") site follows without changing.
-	if got := os.Getenv("TMPDIR"); got != root {
-		t.Errorf("TMPDIR = %q, want %q", got, root)
+	// The environment is the whole mechanism: os.TempDir re-reads
+	// it, so every existing CreateTemp("") site follows without
+	// changing. Which variables matter is platform-dependent.
+	for _, key := range tempDirVars() {
+		if got := os.Getenv(key); got != root {
+			t.Errorf("%s = %q, want %q", key, got, root)
+		}
+	}
+	// os.TempDir is the resolver every CreateTemp("") site goes
+	// through, and asserting on it is what catches a platform whose
+	// variables differ: on Windows the loop above can pass while
+	// GetTempPath still ignores TMPDIR. t.TempDir() would assert
+	// the framework's own directory, not the resolver under test.
+	if got := os.TempDir(); got != root { //nolint:usetesting // the resolver is the subject
+		t.Errorf("os.TempDir() = %q, want %q", got, root)
 	}
 	// The empty dir argument is the behaviour under test: every
 	// existing call site passes "" and must follow TMPDIR without
@@ -62,7 +77,9 @@ func TestNew(t *testing.T) {
 // in for them: a shared name anywhere in the construction would
 // collide here too.
 func TestNewIsUniquePerCall(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
+	for _, key := range tempDirVars() {
+		t.Setenv(key, t.TempDir())
+	}
 
 	a, ca, err := New()
 	if err != nil {
@@ -84,7 +101,9 @@ func TestNewIsUniquePerCall(t *testing.T) {
 // the subtree, not just the empty directory — subprocess leftovers
 // are what fills it.
 func TestNewCleanupRemovesEverything(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
+	for _, key := range tempDirVars() {
+		t.Setenv(key, t.TempDir())
+	}
 
 	root, cleanup, err := New()
 	if err != nil {

@@ -8,13 +8,13 @@
 // touch each other's scratch space and the whole lot is reclaimed
 // by a single RemoveAll.
 //
-// The root is published through TMPDIR rather than threaded as a
-// parameter. os.TempDir reads that variable on every call, so
-// ergon's own os.CreateTemp("") and os.MkdirTemp("") sites follow
-// with no signature change — and, more importantly, so do the
-// subprocesses. gobco copies an entire module per package and
-// gremlins creates a workdir per worker; those are the bulk of the
-// footprint and a threaded parameter cannot reach them.
+// The root is published through the environment rather than
+// threaded as a parameter. os.TempDir consults those variables on
+// every call, so ergon's own os.CreateTemp("") and os.MkdirTemp("")
+// sites follow with no signature change — and, more importantly, so
+// do the subprocesses. gobco copies an entire module per package
+// and gremlins creates a workdir per worker; those are the bulk of
+// the footprint and a threaded parameter cannot reach them.
 package runtmp
 
 import (
@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -29,6 +30,23 @@ import (
 // prefix names every per-run root. Kept distinctive so [Sweep] can
 // recognise ergon's own leftovers without a manifest.
 const prefix = "ergon-run-"
+
+// tempDirVars are the environment variables os.TempDir consults,
+// which differ by platform.
+//
+// Unix reads TMPDIR. Windows resolves through GetTempPath, which
+// checks TMP, then TEMP, then USERPROFILE, and never looks at
+// TMPDIR — so setting TMPDIR alone left every temp on Windows in
+// the system directory while the run root sat empty, and the
+// isolation silently did nothing. TMPDIR is set on Windows too:
+// it costs nothing and cross-platform tooling that reads it
+// directly then agrees with the Go runtime.
+func tempDirVars() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"TMP", "TEMP", "TMPDIR"}
+	}
+	return []string{"TMPDIR"}
+}
 
 // StaleAfter is how old an abandoned root must be before [Sweep]
 // reclaims it.
@@ -55,9 +73,11 @@ func New() (string, func(), error) {
 	if err != nil {
 		return "", func() {}, fmt.Errorf("runtmp: create run root: %w", err)
 	}
-	if err := os.Setenv("TMPDIR", root); err != nil {
-		_ = os.RemoveAll(root)
-		return "", func() {}, fmt.Errorf("runtmp: set TMPDIR: %w", err)
+	for _, key := range tempDirVars() {
+		if err := os.Setenv(key, root); err != nil {
+			_ = os.RemoveAll(root)
+			return "", func() {}, fmt.Errorf("runtmp: set %s: %w", key, err)
+		}
 	}
 	return root, func() { _ = removeAll(root) }, nil
 }
