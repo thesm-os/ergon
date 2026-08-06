@@ -43,11 +43,27 @@ func Coverage(
 		return ErrCoverageDirUnset
 	}
 	_ = stderr // captured per-call below; the stage renderer surfaces it.
-	return stage.PerModule(ctx, stdout, in.Modules, opts,
+
+	// Staged and published for the same reason the profiles are: the
+	// destination is a fixed repository path shared by every
+	// concurrent invocation, and `go tool cover -html -o` truncates
+	// its target before filling it. A reader opening the report at
+	// that moment gets a blank or half-written page.
+	staged, err := os.MkdirTemp("", "ergon-coverage-html-*")
+	if err != nil {
+		return fmt.Errorf("test: create coverage staging dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(staged) }()
+
+	runErr := stage.PerModule(ctx, stdout, in.Modules, opts,
 		"go tool cover", "render per-module HTML reports + total %",
 		func(ctx context.Context, m modules.Module) stage.StepResult {
-			return coverageOne(ctx, runner, in.Root, in.CoverageDir, m)
+			return coverageOne(ctx, runner, in.Root, in.CoverageDir, staged, m)
 		})
+	if err := publishInto(staged, in.CoverageDir); err != nil && runErr == nil {
+		return err
+	}
+	return runErr
 }
 
 // coverageOne is one module's slice of [Coverage]: stat the
@@ -55,9 +71,13 @@ func Coverage(
 // emit the HTML via `go tool cover -html`. The returned
 // [stage.StepResult] carries the percent + HTML path as a success-
 // path note so the rendered verdict line surfaces both inline.
+//
+// The HTML is written into stageDir and published by the caller,
+// but the note names its destination under coverageDir — the
+// staging path is an implementation detail the reader cannot open.
 func coverageOne(
 	ctx context.Context, runner xexec.Runner,
-	root, coverageDir string, m modules.Module,
+	root, coverageDir, stageDir string, m modules.Module,
 ) stage.StepResult {
 	profile := coverageFile(coverageDir, m)
 	if _, err := os.Stat(profile); err != nil {
@@ -73,19 +93,19 @@ func coverageOne(
 		return stage.StepResult{Err: err, Output: funcOut.String()}
 	}
 
-	html := strings.TrimSuffix(profile, ".out") + ".html"
+	name := strings.TrimSuffix(filepath.Base(profile), ".out") + ".html"
 	var htmlErr bytes.Buffer
 	if err := runner.Run(
 		ctx,
 		xexec.Options{Dir: root, Stdout: io.Discard, Stderr: &htmlErr},
-		"go", "tool", "cover", "-html="+profile, "-o", html,
+		"go", "tool", "cover", "-html="+profile, "-o", filepath.Join(stageDir, name),
 	); err != nil {
 		return stage.StepResult{Err: err, Output: htmlErr.String()}
 	}
 
 	pct, ok := parseTotalPercent(funcOut.String())
 	relProfile := relativePath(root, profile)
-	relHTML := relativePath(root, html)
+	relHTML := relativePath(root, filepath.Join(coverageDir, name))
 	note := relProfile + " → " + relHTML
 	if ok {
 		note = fmt.Sprintf("%5.1f%%  %s → %s", pct, relProfile, relHTML)

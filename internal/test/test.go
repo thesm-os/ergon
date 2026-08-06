@@ -56,11 +56,39 @@ func Run(
 	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
 	in Inputs, cfg Config, ov Override, opts stage.Options,
 ) error {
-	if in.CoverageDir != "" {
-		if err := os.MkdirAll(in.CoverageDir, 0o700); err != nil {
-			return fmt.Errorf("create coverage dir: %w", err)
-		}
+	if in.CoverageDir == "" {
+		return runTests(ctx, runner, stdout, stderr, in, cfg, ov, opts, "")
 	}
+	if err := os.MkdirAll(in.CoverageDir, 0o700); err != nil {
+		return fmt.Errorf("create coverage dir: %w", err)
+	}
+	// Staged under the run's private temp root so two concurrent
+	// invocations cannot aim `go test -coverprofile` at the same
+	// files. See [publishProfiles] for why the destination cannot
+	// simply live there too.
+	staged, err := os.MkdirTemp("", "ergon-coverage-*")
+	if err != nil {
+		return fmt.Errorf("test: create coverage staging dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(staged) }()
+
+	runErr := runTests(ctx, runner, stdout, stderr, in, cfg, ov, opts, staged)
+	// Published even when the run failed: a partial profile set is
+	// what `ergon check coverage --no-test` and the uncovered-line
+	// report have always been given after a failing run, and
+	// withholding it would make a failure erase the evidence.
+	if err := publishInto(staged, in.CoverageDir); err != nil && runErr == nil {
+		return err
+	}
+	return runErr
+}
+
+// runTests is [Run]'s body, parameterised by the directory receiving
+// the per-module profiles. Empty disables coverage collection.
+func runTests(
+	ctx context.Context, runner xexec.Runner, stdout, stderr io.Writer,
+	in Inputs, cfg Config, ov Override, opts stage.Options, profileDir string,
+) error {
 	count := pickInt(ov.Count, cfg.Count)
 	cpu := pickInt(ov.CPU, cfg.CPU)
 	timeout := pickDuration(ov.Timeout, cfg.Timeout)
@@ -76,8 +104,8 @@ func Run(
 				"-timeout=" + timeout.String(),
 			}
 			args = appendRunFlag(args, ov.Pattern)
-			if in.CoverageDir != "" {
-				args = append(args, "-coverprofile="+coverageFile(in.CoverageDir, m))
+			if profileDir != "" {
+				args = append(args, "-coverprofile="+coverageFile(profileDir, m))
 				if pkg := coverPkgArg(in.Imports); pkg != "" {
 					args = append(args, "-coverpkg="+pkg)
 				}

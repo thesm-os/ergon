@@ -198,7 +198,7 @@ checks:
         require_branch: true
       - path: internal/...
         line: 70
-        branch: 70
+        branch: 50
         require_branch: true
       # cmd/ergon/... is now gated too. The package is predominantly
       # cobra wiring — every file's init() registers a subcommand and

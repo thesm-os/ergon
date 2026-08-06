@@ -54,17 +54,72 @@ func TestRun(t *testing.T) {
 		}
 		assertContainsAll(t, rootCall.args, []string{
 			"test", "-covermode=atomic", "-cpu=4", "-count=3",
-			"-timeout=10m0s",
-			"-coverprofile=" + filepath.Join(in.CoverageDir, "root.out"),
-			"./...",
+			"-timeout=10m0s", "./...",
 		})
 		cliCall, ok := byDir["/repo/cli"]
 		if !ok {
 			t.Fatalf("no call with dir /repo/cli in %+v", runner.calls)
 		}
-		wantFlag := "-coverprofile=" + filepath.Join(in.CoverageDir, "cli.out")
-		if !slices.Contains(cliCall.args, wantFlag) {
-			t.Fatalf("cli args = %+v, want %q", cliCall.args, wantFlag)
+
+		// Asserted on the flag's presence and on where the profile is
+		// NOT written, rather than on an exact path: the staging
+		// directory is private to the run. Pinning a shared path here
+		// would re-assert the defect — two concurrent runs aiming
+		// `go test -coverprofile` at one file is what corrupted them.
+		for _, c := range []recordedCall{rootCall, cliCall} {
+			var profile string
+			for _, a := range c.args {
+				if after, found := strings.CutPrefix(a, "-coverprofile="); found {
+					profile = after
+				}
+			}
+			if profile == "" {
+				t.Fatalf("args = %+v, want a -coverprofile flag", c.args)
+			}
+			if strings.HasPrefix(profile, in.CoverageDir) {
+				t.Errorf("profile = %q, want it staged outside the published "+
+					"directory %q", profile, in.CoverageDir)
+			}
+		}
+	})
+
+	t.Run("staged profiles are published into the coverage dir", func(t *testing.T) {
+		t.Parallel()
+
+		published := t.TempDir()
+		runner := &fakeRunner{onRun: func(c recordedCall) {
+			for _, a := range c.args {
+				after, found := strings.CutPrefix(a, "-coverprofile=")
+				if !found {
+					continue
+				}
+				if err := os.WriteFile(after, []byte("mode: atomic\n"), 0o600); err != nil {
+					t.Errorf("write staged profile: %v", err)
+				}
+			}
+		}}
+		in := Inputs{
+			Root:        "/repo",
+			Modules:     []modules.Module{{Dir: "."}, {Dir: "cli"}},
+			CoverageDir: published,
+		}
+
+		if err := Run(t.Context(), runner, io.Discard, io.Discard,
+			in, Defaults(), Override{}, stage.Options{}); err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+
+		// Staging is worthless if the gate cannot find the result:
+		// `check coverage --no-test` reads exactly these paths.
+		for _, name := range []string{"root.out", "cli.out"} {
+			body, err := os.ReadFile(filepath.Join(published, name))
+			if err != nil {
+				t.Errorf("read published %s: %v", name, err)
+				continue
+			}
+			if string(body) != "mode: atomic\n" {
+				t.Errorf("%s = %q, want the staged contents", name, body)
+			}
 		}
 	})
 
@@ -291,16 +346,32 @@ func TestCoverage(t *testing.T) {
 		if len(runner.calls) != 2 {
 			t.Fatalf("calls = %d, want 2", len(runner.calls))
 		}
+		// The profile is read from the published directory; the HTML
+		// is written to a staging directory and published afterwards,
+		// so -o must NOT name coverDir. `go tool cover -o` truncates
+		// its target before filling it, and pinning the shared path
+		// here would re-assert the defect: a concurrent reader saw a
+		// blank report.
 		assertContainsAll(t, runner.calls[1].args, []string{
 			"tool", "cover",
 			"-html=" + filepath.Join(coverDir, "cli.out"),
-			"-o", filepath.Join(coverDir, "cli.html"),
+			"-o",
 		})
+		oi := slices.Index(runner.calls[1].args, "-o")
+		if oi < 0 || oi+1 >= len(runner.calls[1].args) {
+			t.Fatalf("args = %+v, want -o <path>", runner.calls[1].args)
+		}
+		if out := runner.calls[1].args[oi+1]; strings.HasPrefix(out, coverDir) {
+			t.Errorf("-o = %q, want it staged outside the published directory %q",
+				out, coverDir)
+		}
 		if !strings.Contains(stdout.String(), "84.5%") {
 			t.Fatalf("stdout missing parsed percent: %q", stdout.String())
 		}
 		// The rendered note should carry both the .out and .html
-		// paths relative to the repo root, joined by an arrow.
+		// paths relative to the repo root, joined by an arrow. The
+		// .html path named is the published one — the staging path is
+		// gone by the time the reader could open it.
 		if !strings.Contains(stdout.String(), "cli.out") || !strings.Contains(stdout.String(), "cli.html") {
 			t.Fatalf("stdout missing out/html pair: %q", stdout.String())
 		}
@@ -515,6 +586,14 @@ type fakeRunner struct {
 	calls  []recordedCall
 	stdout string
 	runErr error
+
+	// onRun, when set, runs for each invocation with the recorded
+	// call. Lets a test stand in for the side effects of the real
+	// binary — `go test -coverprofile=<p>` writing <p> — which is
+	// the only way to observe what the runner does with a file it
+	// was told to produce. Called outside the lock, so it may
+	// itself touch the filesystem.
+	onRun func(recordedCall)
 }
 
 type recordedCall struct {
@@ -524,11 +603,16 @@ type recordedCall struct {
 }
 
 func (f *fakeRunner) Run(_ context.Context, opts xexec.Options, name string, args ...string) error {
+	call := recordedCall{dir: filepath.ToSlash(opts.Dir), name: name, args: slices.Clone(args)}
 	f.mu.Lock()
 	// filepath.ToSlash normalises Windows backslashes so the
 	// per-dir assertions stay portable across operating systems.
-	f.calls = append(f.calls, recordedCall{dir: filepath.ToSlash(opts.Dir), name: name, args: slices.Clone(args)})
+	f.calls = append(f.calls, call)
+	onRun := f.onRun
 	f.mu.Unlock()
+	if onRun != nil {
+		onRun(call)
+	}
 	if opts.Stdout != nil && f.stdout != "" {
 		_, _ = opts.Stdout.Write([]byte(f.stdout))
 	}
