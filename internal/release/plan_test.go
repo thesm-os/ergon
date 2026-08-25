@@ -836,7 +836,7 @@ func TestPlanWaves(t *testing.T) {
 		}
 	})
 
-	t.Run("a cycle degrades to one wave instead of failing", func(t *testing.T) {
+	t.Run("a cycle is reported and the entries stay printable", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
 		write := func(rel, body string) {
@@ -860,15 +860,26 @@ func TestPlanWaves(t *testing.T) {
 			{Module: modules.Module{Dir: "b"}, OldVersion: "0.1.0", NewVersion: "0.1.1", Tag: "b/v0.1.1"},
 		}
 
-		// ApplyPipeline reports the cycle with a usable message; the
-		// plan's job is to stay printable, not to duplicate that
-		// diagnosis or hide the entries behind an error.
+		// Both, not either. The entries must stay printable — the
+		// listing is what shows an operator which modules are
+		// involved — and the cycle must be named, because an
+		// ungrouped plan on its own reads as a formatting choice
+		// rather than as "this release cannot be ordered".
 		waves, err := planWaves(root, mods, plan)
-		if err != nil {
-			t.Fatalf("planWaves on a cycle = %v, want the entries ungrouped", err)
-		}
 		if len(waves) != 1 || len(waves[0]) != 2 {
 			t.Errorf("waves = %v, want a single wave holding both entries", waves)
+		}
+		var cycle *CycleError
+		if !errors.As(err, &cycle) {
+			t.Fatalf("planWaves on a cycle = %v, want a *CycleError", err)
+		}
+		for _, want := range []string{"a", "b"} {
+			if !slices.Contains(cycle.Modules, want) {
+				t.Errorf("cycle.Modules = %v, want it to name %q", cycle.Modules, want)
+			}
+		}
+		if !strings.Contains(cycle.Error(), "--version") {
+			t.Errorf("err = %v, want it to name the way out", cycle)
 		}
 	})
 

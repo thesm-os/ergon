@@ -54,7 +54,7 @@ func TestPublishInto(t *testing.T) {
 		t.Parallel()
 		from, to := t.TempDir(), t.TempDir()
 		if err := os.WriteFile(filepath.Join(to, "root.out"),
-			[]byte("mode: atomic\nstale\nstale\n"), 0o600); err != nil {
+			[]byte("mode: atomic\nold-a\nold-b\n"), 0o600); err != nil {
 			t.Fatalf("seed stale profile: %v", err)
 		}
 		if err := os.WriteFile(filepath.Join(from, "root.out"),
@@ -69,7 +69,7 @@ func TestPublishInto(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read published: %v", err)
 		}
-		if strings.Contains(string(body), "stale") {
+		if strings.Contains(string(body), "old-") {
 			t.Errorf("published = %q, want the previous contents gone", body)
 		}
 	})

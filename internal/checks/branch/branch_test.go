@@ -445,7 +445,8 @@ func TestRunGobcoAllPackages(t *testing.T) {
 			dir := t.TempDir()
 			pkgs = append(pkgs, pkgInfo{ImportPath: fmt.Sprintf("p%d", i), Dir: dir})
 			statsByDir[filepath.ToSlash(dir)] = fmt.Sprintf(
-				`[{"Start":"f%d.go:1:1","Code":"c","TrueCount":1,"FalseCount":1}]`, i)
+				`[{"Start":"f%d.go:1:1","Code":"c","TrueCount":1,"FalseCount":1}]`, i,
+			)
 		}
 		runner := &fakeRunner{statsByDir: statsByDir}
 
@@ -475,7 +476,8 @@ func TestRunGobcoAllPackages(t *testing.T) {
 		pkgs := []pkgInfo{{ImportPath: "a", Dir: t.TempDir()}}
 		runner := &fakeRunner{}
 		if _, err := runGobcoAllPackages(
-			t.Context(), runner, io.Discard, t.TempDir(), pkgs, nil, 0); err != nil {
+			t.Context(), runner, io.Discard, t.TempDir(), pkgs, nil, 0,
+		); err != nil {
 			t.Fatalf("runGobcoAllPackages: %v", err)
 		}
 		if runner.gobcoCalls != 1 {
@@ -486,7 +488,8 @@ func TestRunGobcoAllPackages(t *testing.T) {
 	t.Run("no packages is not an error", func(t *testing.T) {
 		t.Parallel()
 		got, err := runGobcoAllPackages(
-			t.Context(), &fakeRunner{}, io.Discard, t.TempDir(), nil, nil, 2)
+			t.Context(), &fakeRunner{}, io.Discard, t.TempDir(), nil, nil, 2,
+		)
 		if err != nil {
 			t.Fatalf("runGobcoAllPackages err = %v, want nil", err)
 		}
@@ -829,7 +832,8 @@ func TestRunGobcoAllPackagesRecordsSkipReason(t *testing.T) {
 	}}
 
 	stats, err := runGobcoAllPackages(
-		t.Context(), f, io.Discard, root, pkgs, wsImports, 1)
+		t.Context(), f, io.Discard, root, pkgs, wsImports, 1,
+	)
 	if err != nil {
 		t.Fatalf("runGobcoAllPackages err: %v", err)
 	}

@@ -125,6 +125,15 @@ func ApplyPipeline(
 		return err
 	}
 
+	// --version assigns every module the same version, so nothing has
+	// to wait for anything: the ordering the layered pipeline computes
+	// below is not merely unnecessary, it is impossible when the
+	// workspace has a dependency cycle. See [applySingleWave].
+	if opts.Version != "" {
+		return applySingleWave(ctx, runner, root, w, mods, plan, opts,
+			versions, ownPaths)
+	}
+
 	// Skipped entries are considered already-resolved so they do
 	// not block dependents from advancing through the topology.
 	released := map[string]bool{}
@@ -225,7 +234,8 @@ func ApplyPipeline(
 		fmt.Fprintf(w, "  commit  %s  (%s)\n",
 			pinCommitSubject, strings.Join(dirsOf(changed), ", "))
 		if err := commitPaths(
-			ctx, runner, root, changed, PinCommitMessage(names)); err != nil {
+			ctx, runner, root, changed, PinCommitMessage(names),
+		); err != nil {
 			return layerFailure(sources, plan, "commit", err)
 		}
 		pending = true
@@ -914,7 +924,8 @@ func layerFailure(ready []string, plan []PlanEntry, step string, err error) erro
 	return fmt.Errorf(
 		"release: git %s failed while releasing %s: %w\n"+
 			"  tags already created are preserved; re-run `ergon release` to resume",
-		step, strings.Join(tagNames(ready, plan), ", "), err)
+		step, strings.Join(tagNames(ready, plan), ", "), err,
+	)
 }
 
 // tagNames returns the tag-name list for the ready modules so the
@@ -923,6 +934,161 @@ func tagNames(ready []string, plan []PlanEntry) []string {
 	out := make([]string, 0, len(ready))
 	for _, dir := range ready {
 		out = append(out, planEntry(plan, dir).Tag)
+	}
+	return out
+}
+
+// unreplacedSiblings reports, per module directory, the
+// intra-workspace requires that carry no local `replace`.
+//
+// The single-wave release writes every pin before any tag exists, so
+// `go mod tidy` must be able to resolve a sibling without asking the
+// proxy for a version that is still minutes away from being created.
+// A local replace makes it read the directory instead; without one,
+// tidy goes to the network and fails with the `unknown revision`
+// that ended an earlier eidos release.
+func unreplacedSiblings(
+	root string, mods []modules.Module, ownPaths []string,
+) (map[string][]string, error) {
+	own := make(map[string]bool, len(ownPaths))
+	for _, p := range ownPaths {
+		own[p] = true
+	}
+	out := map[string][]string{}
+	for _, m := range mods {
+		modPath := filepath.Join(root, m.Dir, "go.mod")
+		body, err := os.ReadFile(modPath)
+		if err != nil {
+			return nil, fmt.Errorf("release: read %s: %w", m.Dir, err)
+		}
+		f, err := modfile.Parse(modPath, body, nil)
+		if err != nil {
+			return nil, fmt.Errorf("release: parse %s: %w", m.Dir, err)
+		}
+		replaced := make(map[string]bool, len(f.Replace))
+		for _, r := range f.Replace {
+			replaced[r.Old.Path] = true
+		}
+		for _, r := range f.Require {
+			if own[r.Mod.Path] && !replaced[r.Mod.Path] {
+				out[m.Dir] = append(out[m.Dir], r.Mod.Path)
+			}
+		}
+		sort.Strings(out[m.Dir])
+	}
+	return out, nil
+}
+
+// applySingleWave releases every module at one version, in one
+// commit, with every tag on that commit and a single push.
+//
+// Reached only under --version, which already assigns every module
+// the same version. That removes the ordering the layered pipeline
+// exists to compute: no module has to wait for another's tag,
+// because the version it must pin is known before anything is
+// written.
+//
+// This is the only shape that can release a workspace whose modules
+// depend on each other cyclically. Go permits a module cycle and the
+// eidos workspace has one — eidostest requires lang/golang, which
+// requires eidostest — but a cycle has no topological order, so the
+// layered pipeline cannot start: layerReady finds nothing whose
+// dependencies are all released, and the release aborts before it
+// tags anything.
+//
+// What it gives up is real. In the layered pipeline every tag is cut
+// against dependencies already published, so the tagged tree is one
+// `go mod tidy` can verify. Here the pins name versions that do not
+// exist until step 4, so no such verification is possible before the
+// tags are created. That is why this path is --version only and not
+// the default: it is the right trade when ordering is impossible,
+// and the wrong one when it is merely inconvenient.
+func applySingleWave(
+	ctx context.Context, runner xexec.Runner, root string, w io.Writer,
+	mods []modules.Module, plan []PlanEntry, opts Options,
+	versions map[string]string, ownPaths []string,
+) error {
+	stray, err := unreplacedSiblings(root, mods, ownPaths)
+	if err != nil {
+		return err
+	}
+	if len(stray) > 0 {
+		var lines []string
+		for _, m := range mods {
+			if p := stray[m.Dir]; len(p) > 0 {
+				lines = append(lines, fmt.Sprintf("%s requires %s",
+					m.Dir, strings.Join(p, ", ")))
+			}
+		}
+		return fmt.Errorf(
+			"release: --version writes every pin before any tag exists, so each "+
+				"intra-workspace require needs a local `replace` for `go mod tidy` "+
+				"to resolve it from disk; these do not have one: %s",
+			strings.Join(lines, "; "),
+		)
+	}
+
+	// Every module counts as released up front: the version each one
+	// will carry is already decided, so there is no partial state for
+	// a dependent to pin against.
+	released := make(map[string]bool, len(mods))
+	dirs := make([]string, 0, len(mods))
+	for _, m := range mods {
+		released[m.Dir] = true
+		dirs = append(dirs, m.Dir)
+	}
+
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "Tagging... (single wave: every module at %s)\n", opts.Version)
+
+	if !opts.NoBump {
+		candidates := modPaths(dirs)
+		before := snapshotPaths(root, candidates)
+		if _, err := bumpOwnRequires(root, dirs, versions, released); err != nil {
+			return err
+		}
+		// Not gated on --no-push, unlike the layered pipeline's tidy:
+		// every sibling resolves through a local replace, so nothing
+		// here needs a published tag.
+		if err := tidyModules(ctx, runner, root, dirs, ownPaths); err != nil {
+			return err
+		}
+		if changed := changedSince(root, candidates, before); len(changed) > 0 {
+			fmt.Fprintf(w, "  commit  %s  (%s)\n",
+				pinCommitSubject, strings.Join(dirsOf(changed), ", "))
+			msg := PinCommitMessage(tagNames(taggable(plan), plan))
+			if err := commitPaths(ctx, runner, root, changed, msg); err != nil {
+				return fmt.Errorf("release: commit pins: %w", err)
+			}
+		}
+	}
+
+	for _, dir := range taggable(plan) {
+		entry := planEntry(plan, dir)
+		fmt.Fprintf(w, "  tag     %s\n", entry.Tag)
+		if err := EnsureTag(ctx, runner, root, entry.Tag,
+			entry.Tag+"\n\n"+opts.Message); err != nil {
+			return fmt.Errorf("git tag %s: %w", entry.Tag, err)
+		}
+	}
+
+	if !opts.NoPush {
+		fmt.Fprintf(w, "  push    %d tag(s)\n", len(taggable(plan)))
+		if err := pushFollowTags(ctx, runner, root); err != nil {
+			return fmt.Errorf("release: push: %w", err)
+		}
+	}
+	return nil
+}
+
+// taggable returns the plan's non-skipped module directories, in
+// plan order.
+func taggable(plan []PlanEntry) []string {
+	var out []string
+	for _, e := range plan {
+		if !e.Skipped() {
+			out = append(out, e.Module.Dir)
+		}
 	}
 	return out
 }

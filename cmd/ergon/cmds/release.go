@@ -63,7 +63,8 @@ func releasePreflight(opts release.Options, mcfg commitmsg.Config) error {
 				"checked here instead of by the commit-msg hook\n"+
 				"  allow `chore` in checks.commit_msg.types, or pass "+
 				"--no-bump to tag without rewriting go.mod files",
-			err)
+			err,
+		)
 	}
 	return nil
 }

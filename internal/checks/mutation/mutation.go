@@ -291,12 +291,14 @@ func renderTarget(
 		// has to be visible or the layer's number silently changes
 		// meaning between releases.
 		fmt.Fprintf(stdout, "  %s\n", s.Dimmed(fmt.Sprintf(
-			"excluded %d nested module(s): %s", len(nested), strings.Join(nested, ", "))))
+			"excluded %d nested module(s): %s", len(nested), strings.Join(nested, ", "),
+		)))
 	}
 
 	start := time.Now()
 	out, runErr := runGremlins(
-		ctx, runner, dir, pkgPath, gcfg, withNestedExclusions(excludeRegex, nested))
+		ctx, runner, dir, pkgPath, gcfg, withNestedExclusions(excludeRegex, nested),
+	)
 	elapsed := time.Since(start)
 
 	score, scoreOK := parsePercent(out, "Test efficacy:")

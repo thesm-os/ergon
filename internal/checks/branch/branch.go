@@ -185,7 +185,8 @@ func writeSkipNotice(w io.Writer, s style.Style, stats []pkgStats) {
 	fmt.Fprintf(w, "  %s\n", s.Dimmed(
 		"gobco exited without producing coverage for these packages. Its own "+
 			"output follows each one — the cause is usually in the instrumenter "+
-			"rather than in the package."))
+			"rather than in the package.",
+	))
 	fmt.Fprintln(w)
 	for _, st := range skipped {
 		fmt.Fprintf(w, "  %s   %s\n", s.Dimmed("SKIP"), st.Pkg.RepoRel)
@@ -198,7 +199,8 @@ func writeSkipNotice(w io.Writer, s style.Style, stats []pkgStats) {
 		}
 	}
 	fmt.Fprintf(w, "\n  %s\n\n", s.Dimmed(fmt.Sprintf(
-		"%d package(s) excluded from every layer aggregate below.", len(skipped))))
+		"%d package(s) excluded from every layer aggregate below.", len(skipped),
+	)))
 }
 
 // renderTarget writes one per-layer section: header, branch
@@ -222,7 +224,8 @@ func renderTarget(stdout io.Writer, s style.Style, layer coverage.Layer, agg lay
 	partial := ""
 	if agg.SkippedPkgs > 0 && agg.Total > 0 {
 		partial = s.Dimmed(fmt.Sprintf(
-			"   [%d package(s) not measured]", agg.SkippedPkgs))
+			"   [%d package(s) not measured]", agg.SkippedPkgs,
+		))
 	}
 	fmt.Fprintf(stdout,
 		"  Branch:     %5.1f%%  (%d / %d conditions fully covered)%s\n",
@@ -247,7 +250,8 @@ func renderTarget(stdout io.Writer, s style.Style, layer coverage.Layer, agg lay
 		fmt.Fprintf(stdout, "  Verdict:    %s   %s\n\n",
 			s.Fail(), s.Dimmed(fmt.Sprintf(
 				"NOT MEASURED — %d package(s) skipped, 0 conditions collected",
-				agg.SkippedPkgs)))
+				agg.SkippedPkgs,
+			)))
 		if layer.RequireBranch {
 			return true
 		}
@@ -493,7 +497,8 @@ func runGobcoAllPackages(
 	staged := map[string]stagedModfile{}
 	for _, ip := range imports {
 		sm, stageErr := stageModfile(
-			root, ip.Dir, siblingsFor(ip.Dir, pkgs, imports), imports, tmpDir)
+			root, ip.Dir, siblingsFor(ip.Dir, pkgs, imports), imports, tmpDir,
+		)
 		if stageErr != nil {
 			return nil, stageErr
 		}

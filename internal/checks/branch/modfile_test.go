@@ -72,7 +72,8 @@ func TestStageModfile(t *testing.T) {
 		root := wsOnDisk(t)
 		if err := os.WriteFile(filepath.Join(root, "beta", "go.mod"), []byte(
 			"module example.test/ws/beta\n\ngo 1.26\n\n"+
-				"require example.test/ws/alpha v1.4.0\n"), 0o600); err != nil {
+				"require example.test/ws/alpha v1.4.0\n",
+		), 0o600); err != nil {
 			t.Fatalf("write: %v", err)
 		}
 		got, err := stageModfile(root, "beta",
@@ -281,7 +282,8 @@ func TestRequires(t *testing.T) {
 
 	f, err := modfile.Parse("go.mod", []byte(
 		"module example.test/ws/beta\n\ngo 1.26\n\n"+
-			"require example.test/other v1.2.3\n"), nil)
+			"require example.test/other v1.2.3\n",
+	), nil)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}

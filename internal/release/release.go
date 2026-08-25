@@ -75,11 +75,24 @@ func Run(
 			return err
 		}
 	}
-	waves, err := planWaves(root, mods, plan)
-	if err != nil {
-		return err
+	// A cycle is reported, not returned: the plan below is exactly
+	// what an operator needs in order to see the problem, and
+	// swallowing it to raise an error would hide the listing that
+	// names the modules involved. The layered pipeline aborts on its
+	// own further down; --version routes around it entirely.
+	waves, wavesErr := planWaves(root, mods, plan)
+	var cycle *CycleError
+	if wavesErr != nil && !errors.As(wavesErr, &cycle) {
+		return wavesErr
 	}
 	printPlan(stdout, waves)
+	// Not under --version: that mode releases everything at one
+	// version in a single wave, so the missing order is not a
+	// problem to solve and telling the operator to "pass --version"
+	// when they just did reads as a malfunction.
+	if cycle != nil && opts.Version == "" {
+		fmt.Fprintf(stdout, "\n  ! %s\n", cycle.Error())
+	}
 	if opts.DryRun {
 		fmt.Fprintln(stdout, "\n(dry-run; no files changed, no tags created)")
 		return nil

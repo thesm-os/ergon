@@ -308,7 +308,8 @@ func TestResolveReleaseInitVars(t *testing.T) {
 	t.Run("multiple --main produce one build each", func(t *testing.T) {
 		t.Parallel()
 		vars, err := resolveReleaseInitVars(
-			newRepo(t), "proj", []string{"./cmd/foo", "./cmd/bar"}, false, "", "")
+			newRepo(t), "proj", []string{"./cmd/foo", "./cmd/bar"}, false, "", "",
+		)
 		if err != nil {
 			t.Fatalf("resolveReleaseInitVars: %v", err)
 		}
@@ -335,7 +336,8 @@ func TestResolveReleaseInitVars(t *testing.T) {
 	t.Run("homebrew owner/repo splits into tap fields", func(t *testing.T) {
 		t.Parallel()
 		vars, err := resolveReleaseInitVars(
-			newRepo(t), "proj", nil, false, "thesm-os/homebrew-tap", "")
+			newRepo(t), "proj", nil, false, "thesm-os/homebrew-tap", "",
+		)
 		if err != nil {
 			t.Fatalf("resolveReleaseInitVars: %v", err)
 		}
@@ -470,7 +472,8 @@ var commandLine = regexp.MustCompile(`^\s*(?:-\s*)?(?:run|entry):\s*(.+)$|^\t\s*
 // a trailing `ergon` on one line swallow the first word of the
 // next and invents invocations nobody wrote.
 var ergonCall = regexp.MustCompile(
-	`(?:\bergon|\$\(ERGON[A-Z_]*\))((?:[^\S\n]+[a-z][a-z0-9-]*)*)`)
+	`(?:\bergon|\$\(ERGON[A-Z_]*\))((?:[^\S\n]+[a-z][a-z0-9-]*)*)`,
+)
 
 // TestScaffoldedCommandsResolve renders the `ergon init` file set
 // and asserts every `ergon <subcommand>` line it emits resolves to

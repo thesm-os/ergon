@@ -71,7 +71,8 @@ func nestedModules(modRoot, walkRoot string) ([]string, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf(
-			"mutation: scan for nested modules under %s: %w", walkRoot, err)
+			"mutation: scan for nested modules under %s: %w", walkRoot, err,
+		)
 	}
 	sort.Strings(out)
 	return out, nil

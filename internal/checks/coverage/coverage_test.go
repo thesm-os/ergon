@@ -1220,7 +1220,8 @@ func TestAggregateByLayerPolicy(t *testing.T) {
 		}}
 		got := aggregateByLayer(
 			"mode: atomic\ngo.example.com/x/internal/a.go:1.1,2.2 5 1\n",
-			packages, testImports, nil, skips, spans)
+			packages, testImports, nil, skips, spans,
+		)
 		if got[0].TotalStmts != 0 {
 			t.Errorf("TotalStmts = %d, want the skipped function dropped", got[0].TotalStmts)
 		}

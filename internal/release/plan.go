@@ -234,7 +234,18 @@ func planWaves(
 			}
 		}
 		if len(wave) == 0 {
-			return [][]PlanEntry{plan}, nil
+			// Every remaining module is waiting on another that is
+			// also waiting: a cycle. Reported rather than quietly
+			// flattened — the ungrouped plan was the only signal an
+			// operator got, and it reads as a formatting choice, not
+			// as "this release cannot be ordered and will abort".
+			var stuck []string
+			for _, e := range plan {
+				if !placed[e.Module.Dir] {
+					stuck = append(stuck, e.Module.Dir)
+				}
+			}
+			return [][]PlanEntry{plan}, &CycleError{Modules: stuck}
 		}
 		for _, e := range wave {
 			placed[e.Module.Dir] = true
@@ -529,4 +540,31 @@ func ApplyPlan(
 	fmt.Fprintln(w, "Done. Tags are local. Push with:")
 	fmt.Fprintln(w, "  git push --follow-tags")
 	return nil
+}
+
+// CycleError reports that the workspace's modules require each other
+// in a loop, so no release order exists.
+//
+// Not fatal to the plan: [printPlan] still lists every module, and
+// the operator needs that listing to see what the release would do.
+// It is fatal to the layered pipeline, which advances by releasing
+// modules whose dependencies are already released and therefore
+// never starts. Surfacing it at plan time turns an abort part-way
+// through a signing session into a warning before the first prompt.
+//
+// Go permits a module cycle and the toolchain resolves it, so this
+// is not a defect the workspace has to fix — but a release either
+// breaks the cycle or gives up ordering entirely, which is what
+// --version does.
+type CycleError struct {
+	// Modules are the directories that could not be ordered, in
+	// plan order.
+	Modules []string
+}
+
+func (e *CycleError) Error() string {
+	return "release: cyclic intra-workspace dependency among " +
+		strings.Join(e.Modules, ", ") +
+		"; no release order exists — break the cycle, or pass " +
+		"--version to release every module at one version in a single wave"
 }
