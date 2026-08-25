@@ -430,3 +430,61 @@ func TestApplySingleWaveRefusalNamesOnlyOffenders(t *testing.T) {
 		t.Errorf("err = %v, want a left out — it replaces its sibling", err)
 	}
 }
+
+// TestApplyPipelineRefusesCycleBeforeTagging is the regression test
+// for a partial release.
+//
+// The layer loop releases whatever it can reach, so a cycle does not
+// stop it — it stops it eventually. Modules outside the cycle are
+// ready in layer 1 and get tagged and pushed; only the sanity check
+// after the loop notices the rest never went. An eidos run reached
+// `git tag cli/v2.0.0` on a workspace that could never finish, and
+// a published tag cannot be withdrawn once the proxy has it.
+//
+// So the refusal has to come before the first tag, not after the
+// last, and it must name the way out.
+func TestApplyPipelineRefusesCycleBeforeTagging(t *testing.T) {
+	t.Parallel()
+
+	root, mods, plan := cyclicRepo(t, true)
+	// A third module outside the cycle: it is ready immediately and
+	// is exactly what the old code tagged before giving up.
+	if err := os.MkdirAll(filepath.Join(root, "c"), 0o700); err != nil {
+		t.Fatalf("mkdir c: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "c", "go.mod"),
+		[]byte("module example.test/proj/c\n\ngo 1.26\n"), 0o600); err != nil {
+		t.Fatalf("write c: %v", err)
+	}
+	mods = append(mods, modules.Module{Dir: "c"})
+	plan = append(plan, PlanEntry{
+		Module: modules.Module{Dir: "c"}, Level: BumpMinor,
+		OldVersion: "0.1.0", NewVersion: "1.2.0", Tag: "c/v1.2.0",
+	})
+
+	runner := &gitFakeRunner{}
+	err := ApplyPipeline(t.Context(), runner, root, io.Discard, mods, plan,
+		Options{AllowDirty: true, Message: "r"})
+	if err == nil {
+		t.Fatal("ApplyPipeline = nil, want the cycle refused")
+	}
+	if _, ok := errors.AsType[*CycleError](err); !ok {
+		t.Fatalf("err = %v, want a *CycleError", err)
+	}
+	if !strings.Contains(err.Error(), "--version") {
+		t.Errorf("err = %v, want it to name the way out", err)
+	}
+
+	// Nothing may have been written. `c` was releasable and is the
+	// tag the old code cut before failing.
+	for _, c := range runner.calls {
+		if c.name != "git" || len(c.args) == 0 {
+			continue
+		}
+		wrote := c.args[0] == "commit" || c.args[0] == "push" ||
+			(c.args[0] == "tag" && !slices.Contains(c.args, "-l"))
+		if wrote {
+			t.Errorf("git %v ran before the refusal, want nothing written", c.args)
+		}
+	}
+}

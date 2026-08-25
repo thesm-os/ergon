@@ -85,12 +85,22 @@ func Run(
 	if wavesErr != nil && !errors.As(wavesErr, &cycle) {
 		return wavesErr
 	}
+	// --version releases every module at once, so the layering
+	// computed above is not what will happen. Rendering it anyway
+	// promised waves and per-wave pushes the apply never performs —
+	// a plan that describes a different pipeline is worse than one
+	// that describes none.
+	if opts.Version != "" {
+		waves, cycle = [][]PlanEntry{plan}, nil
+	}
 	printPlan(stdout, waves)
-	// Not under --version: that mode releases everything at one
-	// version in a single wave, so the missing order is not a
-	// problem to solve and telling the operator to "pass --version"
-	// when they just did reads as a malfunction.
-	if cycle != nil && opts.Version == "" {
+	if opts.Version != "" {
+		fmt.Fprintf(stdout,
+			"\n  Single wave: every module at %s — pin, tidy, "+
+				"one commit, %d tag(s), one push.\n",
+			opts.Version, len(taggable(plan)))
+	}
+	if cycle != nil {
 		fmt.Fprintf(stdout, "\n  ! %s\n", cycle.Error())
 	}
 	if opts.DryRun {

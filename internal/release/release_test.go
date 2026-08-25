@@ -98,3 +98,48 @@ func TestRun(t *testing.T) {
 		}
 	})
 }
+
+// TestRunVersionRendersOneWave pins what the plan promises under
+// --version.
+//
+// The plan is read immediately before a signing session, so it has to
+// describe the pipeline that will actually run. planWaves computes a
+// layered order regardless of --version, and rendering it advertised
+// waves and per-wave pushes that applySingleWave never performs —
+// "after wave 1 is pushed" for a release that pushes exactly once.
+// A plan describing a different pipeline is worse than one describing
+// none, because an operator has no reason to doubt it.
+func TestRunVersionRendersOneWave(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeMod(t, root, "a", "go.example.com/proj/a")
+	writeMod(t, root, "b", "go.example.com/proj/b")
+	mods := []modules.Module{{Dir: "a"}, {Dir: "b"}}
+
+	run := func(t *testing.T, opts Options) string {
+		t.Helper()
+		var buf strings.Builder
+		if err := Run(t.Context(), &planFakeRunner{}, &buf, root, mods, opts); err != nil {
+			t.Fatalf("Run err: %v", err)
+		}
+		return buf.String()
+	}
+
+	pinned := run(t, Options{Version: "v1.2.0", DryRun: true, Message: "r"})
+	if strings.Contains(pinned, "wave") && !strings.Contains(pinned, "Single wave") {
+		t.Errorf("--version plan = %q, want no layered wave headers", pinned)
+	}
+	// The count is the point: it tells the operator how many hardware
+	// key prompts are coming before the first one appears.
+	if !strings.Contains(pinned, "Single wave: every module at v1.2.0") {
+		t.Errorf("--version plan = %q, want the single-wave summary", pinned)
+	}
+
+	// Without --version the layered rendering must survive: this is
+	// the default path and it genuinely does run in waves.
+	layered := run(t, Options{Force: BumpPatch, DryRun: true, Message: "r"})
+	if strings.Contains(layered, "Single wave") {
+		t.Errorf("default plan = %q, want no single-wave summary", layered)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -141,6 +142,19 @@ func ApplyPipeline(
 		if e.Skipped() {
 			released[e.Module.Dir] = true
 		}
+	}
+
+	// Refused before the first tag, not discovered after the last.
+	//
+	// The layer loop releases whatever it can reach, so a cycle does
+	// not stop it — it stops it *eventually*. Modules outside the
+	// cycle are ready in layer 1 and get tagged and pushed, and only
+	// the sanity check after the loop notices that the rest never
+	// went. That published a subset of a release that was never going
+	// to complete: an eidos run cut cli/v2.0.0 and lang/typescript
+	// before failing, leaving tags whose siblings do not exist.
+	if err := ensureOrderable(plan, deps, released); err != nil {
+		return err
 	}
 
 	fmt.Fprintln(w)
@@ -1091,4 +1105,38 @@ func taggable(plan []PlanEntry) []string {
 		}
 	}
 	return out
+}
+
+// ensureOrderable reports whether every module the plan tags can be
+// reached by the layer loop, i.e. whether the dependency graph has a
+// topological order.
+//
+// Runs the same readiness walk the pipeline does, against a copy of
+// the released set, and writes nothing. A workspace whose modules
+// require each other has no such order; --version releases it in a
+// single wave instead, which is what the error points at.
+func ensureOrderable(
+	plan []PlanEntry, deps map[string]map[string]bool, released map[string]bool,
+) error {
+	seen := make(map[string]bool, len(released))
+	maps.Copy(seen, released)
+	for {
+		ready := layerReady(plan, deps, seen)
+		if len(ready) == 0 {
+			break
+		}
+		for _, dir := range ready {
+			seen[dir] = true
+		}
+	}
+	var stuck []string
+	for _, e := range plan {
+		if !e.Skipped() && !seen[e.Module.Dir] {
+			stuck = append(stuck, e.Module.Dir)
+		}
+	}
+	if len(stuck) == 0 {
+		return nil
+	}
+	return &CycleError{Modules: stuck}
 }
