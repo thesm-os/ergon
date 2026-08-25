@@ -10,6 +10,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -498,10 +499,18 @@ func workspaceDeps(root string, mods []modules.Module) (map[string]map[string]bo
 
 // modPaths returns the repo-relative go.mod and go.sum path of each
 // directory, whether or not either file exists yet.
+//
+// Slash-separated on every platform, because these strings are
+// pathspecs for `git add`, and git pathspecs are forward-slash
+// regardless of host. Built with filepath.Join they came out as
+// `leaf\go.mod` on Windows, which the commit then staged under a
+// name no other part of the pipeline agreed with. Callers that need
+// to touch the file convert back with filepath.FromSlash.
 func modPaths(dirs []string) []string {
 	out := make([]string, 0, len(dirs)*2)
 	for _, d := range dirs {
-		out = append(out, filepath.Join(d, "go.mod"), filepath.Join(d, "go.sum"))
+		d = filepath.ToSlash(d)
+		out = append(out, path.Join(d, "go.mod"), path.Join(d, "go.sum"))
 	}
 	return out
 }
@@ -515,7 +524,7 @@ func snapshotPaths(root string, paths []string) map[string]string {
 		// A read failure is treated as absence on purpose: the only
 		// consequence is that the path is considered changed and
 		// gets committed, which is the safe direction.
-		if body, err := os.ReadFile(filepath.Join(root, p)); err == nil {
+		if body, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(p))); err == nil {
 			out[p] = string(body)
 		}
 	}
@@ -527,7 +536,7 @@ func snapshotPaths(root string, paths []string) map[string]string {
 func changedSince(root string, paths []string, before map[string]string) []string {
 	var out []string
 	for _, p := range paths {
-		body, err := os.ReadFile(filepath.Join(root, p))
+		body, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(p)))
 		if err != nil {
 			continue
 		}
@@ -546,7 +555,7 @@ func dirsOf(paths []string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, p := range paths {
-		d := filepath.ToSlash(filepath.Dir(p))
+		d := path.Dir(filepath.ToSlash(p))
 		if !seen[d] {
 			seen[d] = true
 			out = append(out, d)

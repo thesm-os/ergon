@@ -488,3 +488,59 @@ func TestApplyPipelineRefusesCycleBeforeTagging(t *testing.T) {
 		}
 	}
 }
+
+// TestModPathsAreGitPathspecs pins the separator these strings use.
+//
+// They are handed to `git add` as pathspecs, and git pathspecs are
+// forward-slash on every host. Built with filepath.Join they came out
+// as `leaf\go.mod` on Windows, so the commit staged a name nothing
+// else in the pipeline agreed with and the pin never landed — green
+// on Linux and macOS, red only on Windows.
+//
+// The input is deliberately platform-native: on Windows that is a
+// backslash path, which is exactly the case that regressed, and on
+// Linux it is the ordinary one. Feeding a literal backslash instead
+// would assert nothing here, since a backslash is a legal filename
+// character on Unix and ToSlash leaves it alone.
+func TestModPathsAreGitPathspecs(t *testing.T) {
+	t.Parallel()
+
+	got := modPaths([]string{filepath.Join("lang", "golang")})
+	want := []string{"lang/golang/go.mod", "lang/golang/go.sum"}
+	if !slices.Equal(got, want) {
+		t.Errorf("modPaths = %q, want %q", got, want)
+	}
+
+	// The announcement derives from the same strings and must stay
+	// readable rather than echoing a host separator back.
+	if dirs := dirsOf(got); !slices.Equal(dirs, []string{"lang/golang"}) {
+		t.Errorf("dirsOf = %q, want [lang/golang]", dirs)
+	}
+}
+
+// TestChangedSinceUsesSlashPathsOnDisk pins that a slash pathspec is
+// still resolvable as a file, which is what makes the conversion
+// safe: the pipeline reports git paths but reads real ones.
+func TestChangedSinceUsesSlashPathsOnDisk(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dir := filepath.Join(root, "lang", "golang")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.test/x\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	paths := modPaths([]string{filepath.Join("lang", "golang")})
+	before := snapshotPaths(root, paths)
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.test/x\n\ngo 1.26\n"), 0o600); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if got := changedSince(root, paths, before); !slices.Equal(got, []string{"lang/golang/go.mod"}) {
+		t.Errorf("changedSince = %q, want the slash path reported", got)
+	}
+}
