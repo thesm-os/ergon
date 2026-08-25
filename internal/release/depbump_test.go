@@ -420,7 +420,11 @@ func TestChangedSince(t *testing.T) {
 	}
 
 	got := changedSince(root, paths, before)
-	want := []string{filepath.Join("cli", "go.mod"), filepath.Join("cli", "go.sum")}
+	// Slash-separated, not filepath.Join: these strings are git
+	// pathspecs, and building the expectation with the host
+	// separator is what let `leaf\\go.mod` reach `git add` on
+	// Windows unnoticed.
+	want := []string{"cli/go.mod", "cli/go.sum"}
 	if !slices.Equal(got, want) {
 		t.Errorf("changedSince = %+v, want %+v", got, want)
 	}
@@ -438,9 +442,9 @@ func TestDirsOf(t *testing.T) {
 	t.Parallel()
 
 	got := dirsOf([]string{
-		filepath.Join("cli", "go.sum"),
-		filepath.Join("cli", "go.mod"),
-		filepath.Join("api", "go.mod"),
+		"cli/go.sum",
+		"cli/go.mod",
+		"api/go.mod",
 	})
 	if want := []string{"api", "cli"}; !slices.Equal(got, want) {
 		t.Errorf("dirsOf = %+v, want %+v", got, want)
